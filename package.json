@@ -1,0 +1,12 @@
+{
+  "name": "lfk-kamper",
+  "version": "1.0.0",
+  "description": "Sync the LFK kamper sheet with Lillehammer FK's fixture list on fotball.no",
+  "private": false,
+  "scripts": {
+    "test": "node skill/scripts/test_code.js",
+    "push": "clasp push",
+    "package": "bash tools/package-skill.sh"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,16 @@
+# clasp OAuth credentials — never commit these
+.clasprc.json
+
+# points at one specific Apps Script project; copy .clasp.json.example
+.clasp.json
+
+# build output
+dist/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+
+# local scratch
+_to_delete/

@@ -4,11 +4,18 @@
  * Henter Lillehammer FK sin offisielle kalenderstrøm (iCal) fra fotball.no,
  * filtrerer ned til lagene du følger, og oppdaterer regnearket.
  *
+ * KOLONNER
+ *
+ * Påkrevd: Dato, Hjemmelag, Bortelag, Turnering — de tre siste kjenner igjen
+ * raden, Dato fester kampen i tid. Alt annet er valgfritt, og en kolonne som
+ * ikke finnes blir hverken lest eller skrevet.
+ *
  * ARBEIDSDELINGEN MELLOM DE TO DATOKOLONNENE
  *
  *   Dato     = det fotball.no sier. Skrives alltid.
  *   Ny dato  = det dere har avtalt, og som ikke nødvendigvis er registrert
- *              i FIKS ennå. Dette er menneskets kolonne.
+ *              i FIKS ennå. Dette er menneskets kolonne, og den er valgfri —
+ *              uten den finnes ingen lokale avtaler, og alt følger fotball.no.
  *
  * En rad der de to er ulike har en lokal avtale på seg. Den avtalen er hele
  * poenget med kolonnen, og synken skal ikke kunne rive den bort. Derfor:
@@ -73,7 +80,10 @@ function feedUrl_(clubId) {
 }
 
 const COLS = ['Kommentar', 'Dato', 'Ny dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering'];
-const REQUIRED_COLS = ['Dato', 'Ny dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering'];
+// Bare det som trengs for å kjenne igjen en rad og feste en dato på den.
+// Alt annet — Ny dato, Dag, Tid, Bane, Kommentar — er valgfritt, og en kolonne
+// som ikke finnes blir hverken lest eller skrevet.
+const REQUIRED_COLS = ['Dato', 'Hjemmelag', 'Bortelag', 'Turnering'];
 const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
 
 // --------------------------------------------------------------- CONFIG-ARK -
@@ -503,9 +513,12 @@ function locateTable_(settings) {
     const idx = header.findIndex(function (h) { return norm_(h) === norm_(name); });
     if (idx !== -1) col[name] = idx;
   });
-  REQUIRED_COLS.forEach(function (name) {
-    if (col[name] === undefined) throw new Error('Mangler kolonnen "' + name + '" i overskriftsraden');
-  });
+  const missing = REQUIRED_COLS.filter(function (name) { return col[name] === undefined; });
+  if (missing.length) {
+    throw new Error('Arket "' + sheet.getName() + '" mangler kolonnen(e) ' +
+                    missing.map(function (m) { return '"' + m + '"'; }).join(', ') +
+                    '. Overskrifter funnet: ' + header.filter(Boolean).join(', '));
+  }
 
   return { sheet: sheet, values: values, header: header, headerRow: headerRow, col: col,
            rows: values.slice(headerRow + 1), formulas: formulas.slice(headerRow + 1) };
@@ -572,11 +585,14 @@ function buildPlan_(profile) {
   t.rows.forEach(function (r, i) {
     if (isBlank_(r)) return;
     const row = { idx: i, rowNum: t.headerRow + 2 + i, cells: r };
-    row.serie = String(r[t.col['Turnering']]).trim();
-    row.home = String(r[t.col['Hjemmelag']]).trim();
-    row.away = String(r[t.col['Bortelag']]).trim();
-    row.dato = fmtCell_(r[t.col['Dato']], 'Dato');
-    row.nyDato = fmtCell_(r[t.col['Ny dato']], 'Ny dato');
+    const cell = function (name) {
+      return t.col[name] === undefined ? '' : fmtCell_(r[t.col[name]], name);
+    };
+    row.serie = cell('Turnering');
+    row.home = cell('Hjemmelag');
+    row.away = cell('Bortelag');
+    row.dato = cell('Dato');
+    row.nyDato = cell('Ny dato');        // tom når kolonnen ikke finnes
     row.label = (row.nyDato || row.dato) + ' ' + row.home + ' - ' + row.away + ' (' + row.serie + ')';
     row.key = matchKey_(row.serie, row.home, row.away);
 

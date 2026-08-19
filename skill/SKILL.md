@@ -116,6 +116,12 @@ The two date columns divide the work between fotball.no and the coaches:
 A row where the two differ has a local agreement on it, and that agreement is
 the whole point of the column — the sync must not be able to tear it away. So:
 
+Only `Dato`, `Hjemmelag`, `Bortelag` and `Turnering` have to exist. Every other
+column is optional — including `Ny dato`. A sheet without it has no local
+agreements at all, so `localMoves`, `resolved` and `conflicts` stay empty and
+everything follows fotball.no. Do not tell the user a column is missing unless
+it is one of the four required ones; absence is a valid choice.
+
 | Column | Written when |
 |---|---|
 | `Dato` | always, from the feed |

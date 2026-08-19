@@ -286,6 +286,44 @@ check('re-running against long names finds no new rows', plan2.additions.length,
 check('and proposes no further name churn', plan2.nameChanges.length, 0);
 sheetValues.splice(0, sheetValues.length, ...original);
 
+console.log('\n--- optional columns ---');
+// Drop "Ny dato" entirely: a sheet that never uses local agreements.
+const FULL_HEADER = HEADER.slice(), FULL_ROWS = sheetValues.slice(1).map(r => r.slice());
+const nyIdx = C['Ny dato'];
+HEADER.splice(nyIdx, 1);
+Object.keys(C).forEach(k => delete C[k]);
+HEADER.forEach((h, i) => C[h] = i);
+sheetValues.splice(0, sheetValues.length,
+  HEADER, ...FULL_ROWS.map(r => r.filter((_, i) => i !== nyIdx)));
+
+const planNoNy = sandbox.buildPlans_('Kamper')[0];
+check('a sheet without "Ny dato" still builds a plan', typeof planNoNy.updates, 'object');
+check('nothing is written to the missing column',
+  planNoNy.updates.every(u => u.changes.every(c => c.column !== 'Ny dato')), true);
+check('no row is read as the literal string "undefined"',
+  planNoNy.updates.every(u => u.changes.every(c => c.from !== 'undefined')), true);
+check('local agreements are impossible without the column', planNoNy.localMoves.length, 0);
+check('the Ottestad row becomes an ordinary row and follows fotball.no',
+  (planNoNy.updates.find(u => /Ottestad G16-1/.test(u.label)) || { changes: [] })
+    .changes.filter(c => c.column === 'Dato').length, 0);
+check('Lørenskog still syncs',
+  (planNoNy.updates.find(u => /Lørenskog/.test(u.label)) || { changes: [] })
+    .changes.some(c => c.column === 'Dato' && c.to === '19.09.2026'), true);
+check('and rows are still matched, not duplicated', planNoNy.additions.length, 0);
+
+// A column the matching genuinely needs is still an error, and names them all.
+const noTurnering = HEADER.filter(h => h !== 'Turnering');
+sheetValues.splice(0, 1, noTurnering);
+check('missing required columns fail with a list', (() => {
+  try { sandbox.locateTable_({ sheetName: 'Kamper' }); return false; }
+  catch (e) { return /Turnering/.test(e.message); }
+})(), true);
+
+Object.keys(C).forEach(k => delete C[k]);
+FULL_HEADER.forEach((h, i) => C[h] = i);
+HEADER.splice(0, HEADER.length, ...FULL_HEADER);
+sheetValues.splice(0, sheetValues.length, FULL_HEADER, ...FULL_ROWS);
+
 console.log('\n--- filling an empty sheet is not a duplication risk ---');
 // A brand new fixture tab: header row only. Everything in the feed is new, and
 // that is exactly right — there are no existing rows to fail to recognise.

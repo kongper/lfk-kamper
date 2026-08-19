@@ -15,19 +15,24 @@ kickoff times, pitches, new fixtures. It runs nightly on its own and mails you
 only when something actually moved. There is also a menu in the sheet, and an
 optional web app so an agent can run a sync and explain the result.
 
-The sheet keeps two date columns, and the split is the heart of the design:
+Only four columns are required — `Dato`, `Hjemmelag`, `Bortelag`, `Turnering`.
+The last three identify the row; `Dato` anchors it in time. Everything else is
+optional, and a column that isn't there is neither read nor written.
 
-| Column | Owner | Written by the sync |
-|---|---|---|
-| `Dato` | fotball.no | always |
-| `Ny dato` | the coaches | only when it is mirroring `Dato` |
-| `Dag` | follows the date actually played | only when no local agreement exists |
-| `Tid`, `Bane`, `Hjemmelag`, `Bortelag` | fotball.no | always |
-| `Kommentar` | the coaches | never |
+| Column | Required | Owner | Written by the sync |
+|---|---|---|---|
+| `Dato` | yes | fotball.no | always |
+| `Hjemmelag`, `Bortelag`, `Turnering` | yes | fotball.no | always |
+| `Ny dato` | no | the coaches | only when it is mirroring `Dato` |
+| `Dag` | no | follows the date actually played | only when no local agreement exists |
+| `Tid`, `Bane` | no | fotball.no | always |
+| `Kommentar` | no | the coaches | never |
 
 Youth fixtures get moved by agreement between clubs long before FIKS knows about
 it. `Ny dato` is where that agreement lives, so the sync must never overwrite it
-— and a row where the two dates differ is reported, not "corrected".
+— and a row where the two dates differ is reported, not "corrected". Leave the
+column out and there are no agreements to protect: everything simply follows
+fotball.no, which is what a straightforward fixture list wants.
 
 ## Three things that were not obvious
 

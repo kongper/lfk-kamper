@@ -79,16 +79,22 @@ const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag'
 // --------------------------------------------------------------- CONFIG-ARK -
 
 /**
- * Innstillingene ligger i arket "config", som nøkkel/verdi. En nøkkel kan stå
- * på flere rader — det er slik "Lag" blir en liste.
+ * Arket "config" har én kolonne per terminliste. Overskriften i kolonnen er
+ * navnet på fanen den styrer, så ett regneark kan holde flere lag med hver
+ * sine innstillinger.
  *
- *   Nøkkel              Verdi
- *   Klubb-ID            1683
- *   Lag                 Lillehammer G15-1
- *   Lag                 Lillehammer G15-2
- *   ...
- *   Varsle e-post       din@epost.no
- *   Sorter etter dato   ja
+ *   Nøkkel              kampoppsett_2026     J13 2026
+ *   Klubb-ID            1683                 1683
+ *   Lag                 Lillehammer G15-1    Lillehammer J13-1
+ *   Lag                 Lillehammer G15-2    Lillehammer J13-2
+ *   Lag                 Lillehammer G16-1
+ *   Lag                 Lillehammer G16-2
+ *   Varsle e-post       din@epost.no         annen@epost.no
+ *   Sorter etter dato   ja                   ja
+ *
+ * En nøkkel kan stå på flere rader — det er slik "Lag" blir en liste. Tomme
+ * celler betyr bare at den kolonnen ikke bruker den raden, så kolonnene
+ * trenger ikke være like lange.
  *
  * "Lag" er et PREFIKS. "Lillehammer G16-1" treffer bare det laget, mens
  * "Lillehammer G16" ville tatt med alle G16-lagene i klubben — også G16-3,
@@ -97,46 +103,77 @@ const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag'
  *
  * Poenget med å styre på lag i stedet for på serienavn: et lag beholder navnet
  * gjennom sesongen, mens serienavnene bytter hver gang laget rykker opp et
- * årstrinn. Nye serier og cupkamper for de samme lagene kommer nå med av seg
- * selv.
+ * årstrinn. Nye serier og cupkamper for de samme lagene kommer med av seg selv.
+ *
+ * Den gamle enkolonne-varianten med overskriften "Verdi" leses fortsatt. Da
+ * finnes fanen via nøkkelen "Ark", eller på innhold hvis den står tom.
  */
-function loadSettings_() {
+function loadProfiles_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(CONFIG.CONFIG_SHEET);
-  const raw = {};
+  if (!sheet) return [buildProfile_('', {})];
 
-  if (sheet) {
-    sheet.getDataRange().getValues().forEach(function (r, i) {
-      const key = String(r[0]).trim(), val = String(r[1]).trim();
-      if (!key || !val) return;
-      if (i === 0 && norm_(key) === 'nøkkel') return;      // overskriftsrad
+  const values = sheet.getDataRange().getValues();
+  if (!values.length) return [buildProfile_('', {})];
+  const header = values[0].map(function (c) { return String(c).trim(); });
+
+  const profiles = [];
+  for (var c = 1; c < header.length; c++) {
+    if (!header[c]) continue;
+    const raw = {};
+    for (var r = 1; r < values.length; r++) {
+      const key = String(values[r][0]).trim();
+      const val = String(values[r][c]).trim();
+      if (!key || !val) continue;
       (raw[key] = raw[key] || []).push(val);
-    });
+    }
+    if (!Object.keys(raw).length) continue;          // tom kolonne, hopp over
+    profiles.push(buildProfile_(norm_(header[c]) === 'verdi' ? '' : header[c], raw));
   }
+  return profiles.length ? profiles : [buildProfile_('', {})];
+}
 
+function buildProfile_(sheetName, raw) {
   const pick = function (key) {
     const hit = Object.keys(raw).find(function (k) { return norm_(k) === norm_(key); });
     return hit ? raw[hit] : CONFIG.DEFAULTS[key];
   };
-
   const teams = pick('Lag') || [];
-  if (!teams.length) throw new Error('Ingen lag satt opp i arket "' + CONFIG.CONFIG_SHEET + '"');
-
+  if (!teams.length) {
+    throw new Error('Ingen "Lag" satt opp for kolonnen "' + (sheetName || 'Verdi') +
+                    '" i arket "' + CONFIG.CONFIG_SHEET + '"');
+  }
   return {
+    sheetName: sheetName || (pick('Ark') || [''])[0],
     clubId: (pick('Klubb-ID') || ['1683'])[0],
     teams: teams,
     notifyEmail: (pick('Varsle e-post') || [''])[0],
-    sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0]),
-    fromSheet: !!sheet
+    sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0])
   };
+}
+
+/** Har fanen en "Turnering"-overskrift blant de øverste radene? */
+function hasFixtureHeader_(sheet) {
+  const rows = Math.min(10, sheet.getLastRow());
+  const cols = sheet.getLastColumn();
+  if (!rows || !cols) return false;
+  return sheet.getRange(1, 1, rows, cols).getValues().some(function (r) {
+    return r.some(function (c) { return norm_(c) === 'turnering'; });
+  });
 }
 
 function ensureConfigSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (ss.getSheetByName(CONFIG.CONFIG_SHEET)) return ss.getSheetByName(CONFIG.CONFIG_SHEET);
+  const existing = ss.getSheetByName(CONFIG.CONFIG_SHEET);
+  if (existing) return existing;
+
+  // Kolonneoverskriften skal være navnet på fanen den styrer, så finn den.
+  const target = ss.getSheets().filter(function (sh) {
+    return sh.getName() !== CONFIG.CONFIG_SHEET && hasFixtureHeader_(sh);
+  })[0];
 
   const sheet = ss.insertSheet(CONFIG.CONFIG_SHEET, ss.getNumSheets());
-  const rows = [['Nøkkel', 'Verdi']];
+  const rows = [['Nøkkel', target ? target.getName() : 'Terminliste']];
   Object.keys(CONFIG.DEFAULTS).forEach(function (key) {
     CONFIG.DEFAULTS[key].forEach(function (v) { rows.push([key, v]); });
   });
@@ -145,6 +182,17 @@ function ensureConfigSheet_() {
   sheet.setColumnWidth(1, 170);
   sheet.setColumnWidth(2, 240);
   return sheet;
+}
+
+/** Planer for alle terminlistene, eventuelt bare den ene du ber om. */
+function buildPlans_(sheetFilter) {
+  const profiles = loadProfiles_().filter(function (p) {
+    return !sheetFilter || norm_(p.sheetName) === norm_(sheetFilter);
+  });
+  if (!profiles.length) {
+    throw new Error('Ingen kolonne i "' + CONFIG.CONFIG_SHEET + '" heter "' + sheetFilter + '"');
+  }
+  return profiles.map(function (p) { return buildPlan_(p); });
 }
 
 // ----------------------------------------------------------------- OPPSETT -
@@ -158,8 +206,7 @@ function setup() {
   }
 
   ensureConfigSheet_();
-  const settings = loadSettings_();
-  const t = locateTable_();
+  const profiles = loadProfiles_();
 
   ScriptApp.getProjectTriggers()
     .filter(function (tr) { return tr.getHandlerFunction() === 'nightly'; })
@@ -170,10 +217,11 @@ function setup() {
     '=========================================================',
     ' API_TOKEN: ' + token,
     '=========================================================',
-    'Arket: "' + t.sheet.getName() + '", overskrifter på rad ' + (t.headerRow + 1) +
-      ', ' + t.rows.length + ' datarader.',
-    'Innstillinger i arket "' + CONFIG.CONFIG_SHEET + '". Lag som følges: ' +
-      settings.teams.join(', ') + '.',
+    'Innstillinger i arket "' + CONFIG.CONFIG_SHEET + '" — én kolonne per terminliste.',
+    profiles.map(function (p) {
+      const t = locateTable_(p);
+      return '  "' + t.sheet.getName() + '": ' + t.rows.length + ' rader, følger ' + p.teams.join(', ');
+    }).join('\n'),
     'Nattlig synk satt opp ca. kl ' + CONFIG.NIGHTLY_HOUR + ':00 (' + CONFIG.TIMEZONE + ').',
     '',
     'Web-app er valgfritt — hele synken kan kjøres fra LFK kamper-menyen i arket.',
@@ -193,7 +241,7 @@ function setup() {
  * som heter nøyaktig dette, og sier fra hva den gjorde.
  */
 function ryddKolonner() {
-  const t = locateTable_();
+  const t = locateTable_(loadProfiles_()[0]);
   const doomed = ['Varsling', 'KampID'];
   const found = [];
   t.header.forEach(function (h, i) {
@@ -222,19 +270,30 @@ function onOpen() {
     .addToUi();
 }
 
-function menuPreview() { showText_('Forhåndsvisning', renderPlan_(buildPlan_())); }
+function menuPreview() {
+  const plans = buildPlans_();
+  showText_('Forhåndsvisning', plans.map(renderPlan_).join('\n\n' + '='.repeat(60) + '\n\n'));
+}
 
 function menuApply() {
-  const plan = buildPlan_();
-  if (plan.updates.length + plan.additions.length === 0) { showText_('Synk', renderPlan_(plan)); return; }
+  const plans = buildPlans_();
+  const pending = plans.filter(function (p) { return p.updates.length + p.additions.length; });
+  const body = plans.map(renderPlan_).join('\n\n' + '='.repeat(60) + '\n\n');
+  if (!pending.length) { showText_('Synk', body); return; }
+
   const ui = SpreadsheetApp.getUi();
-  if (ui.alert('Kjør synk?', renderPlan_(plan) + '\n\nSkrive dette til arket?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
-  const res = applyPlan_(plan);
-  showText_('Synk fullført',
-    'Rader oppdatert: ' + res.rowsUpdated + '\nRader lagt til: ' + res.rowsAdded +
-    (res.sort && res.sort.sorted ? '\nSortert på Dato (' + res.sort.how + ')' : '') +
-    (res.additionsHeld ? '\n\nNye rader ble HOLDT TILBAKE — se advarselen i forhåndsvisningen.' : '') +
-    (res.warnings.length ? '\n\nAdvarsler:\n- ' + res.warnings.join('\n- ') : ''));
+  if (ui.alert('Kjør synk?', body + '\n\nSkrive dette til arkene?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  const lines = pending.map(function (plan) {
+    const res = applyPlan_(plan);
+    return [plan.sheetName + ':',
+            '  Rader oppdatert: ' + res.rowsUpdated + ', lagt til: ' + res.rowsAdded,
+            res.sort && res.sort.sorted ? '  Sortert på Dato (' + res.sort.how + ')' : '',
+            res.additionsHeld ? '  NYE RADER HOLDT TILBAKE — se advarselen i forhåndsvisningen.' : '',
+            res.warnings.length ? '  Advarsler:\n   - ' + res.warnings.join('\n   - ') : ''
+           ].filter(Boolean).join('\n');
+  });
+  showText_('Synk fullført', lines.join('\n\n'));
 }
 
 function showText_(title, body) {
@@ -257,15 +316,24 @@ function doPost(e) {
 
   try {
     switch (body.action) {
-      case 'ping':    return json_({ ok: true, action: 'ping', sheet: locateTable_().sheet.getName() });
-      case 'read':    return json_({ ok: true, action: 'read', table: readTable_() });
-      case 'feed':    return json_({ ok: true, action: 'feed', fixtures: fetchFixtures_() });
-      case 'config':  return json_({ ok: true, action: 'config', settings: loadSettings_() });
-      case 'preview': return json_({ ok: true, action: 'preview', plan: buildPlan_() });
+      case 'ping': return json_({ ok: true, action: 'ping', sheets: loadProfiles_().map(function (p) {
+        return locateTable_(p).sheet.getName();
+      }) });
+      case 'read': return json_({ ok: true, action: 'read', tables: loadProfiles_()
+        .filter(function (p) { return !body.sheet || norm_(p.sheetName) === norm_(body.sheet); })
+        .map(function (p) { return readTable_(p.sheetName); }) });
+      case 'feed': return json_({ ok: true, action: 'feed', feeds: loadProfiles_()
+        .filter(function (p) { return !body.sheet || norm_(p.sheetName) === norm_(body.sheet); })
+        .map(function (p) { return { sheet: p.sheetName, fixtures: fetchFixtures_(p) }; }) });
+      case 'config':  return json_({ ok: true, action: 'config', profiles: loadProfiles_() });
+      case 'preview': return json_({ ok: true, action: 'preview', plans: buildPlans_(body.sheet) });
       case 'apply': {
-        const plan = filterPlan_(buildPlan_(), body.only, body.exclude);
-        if (body.forceAdditions) plan.forceAdditions = true;
-        return json_({ ok: true, action: 'apply', result: applyPlan_(plan), skipped: plan.skipped });
+        const results = buildPlans_(body.sheet).map(function (plan) {
+          const p = filterPlan_(plan, body.only, body.exclude);
+          if (body.forceAdditions) p.forceAdditions = true;
+          return { sheet: p.sheetName, result: applyPlan_(p), skipped: p.skipped };
+        });
+        return json_({ ok: true, action: 'apply', results: results });
       }
       default: return json_({ ok: false, error: 'unknown_action', got: body.action });
     }
@@ -281,25 +349,28 @@ function json_(obj) {
 // ------------------------------------------------------------ NATTLIG KJØR -
 
 function nightly() {
-  const plan = buildPlan_();
-  const n = plan.updates.length + plan.additions.length +
-            plan.missingFromFeed.length + plan.resolved.length + plan.conflicts.length;
-  if (n === 0) return;
+  buildPlans_().forEach(function (plan) {
+    const notable = plan.updates.length + plan.additions.length +
+                    plan.missingFromFeed.length + plan.resolved.length + plan.conflicts.length;
+    if (notable === 0) return;
 
-  const res = applyPlan_(plan);
-  const body = renderPlan_(plan) +
-    '\n\n---\nSkrevet: ' + res.rowsUpdated + ' rad(er) oppdatert, ' + res.rowsAdded + ' lagt til.' +
-    (res.additionsHeld ? '\nNye rader ble holdt tilbake — se advarselen over.' : '') +
-    (res.warnings.length ? '\n\nAdvarsler:\n- ' + res.warnings.join('\n- ') : '');
+    const res = applyPlan_(plan);
+    const body = renderPlan_(plan) +
+      '\n\n---\nSkrevet: ' + res.rowsUpdated + ' rad(er) oppdatert, ' + res.rowsAdded + ' lagt til.' +
+      (res.additionsHeld ? '\nNye rader ble holdt tilbake — se advarselen over.' : '') +
+      (res.warnings.length ? '\n\nAdvarsler:\n- ' + res.warnings.join('\n- ') : '');
 
-  const to = loadSettings_().notifyEmail;
-  if (to) MailApp.sendEmail(to, 'LFK kamper: endringer i terminlisten', body);
+    // Hver kolonne i config har sin egen mottaker, så varselet går dit.
+    if (plan.notifyEmail) {
+      MailApp.sendEmail(plan.notifyEmail, 'LFK kamper: endringer i ' + plan.sheetName, body);
+    }
+  });
 }
 
 // ------------------------------------------------------------ KALENDERSTRØM -
 
 function fetchFixtures_(settings) {
-  settings = settings || loadSettings_();
+  settings = settings || loadProfiles_()[0];
   const res = UrlFetchApp.fetch(feedUrl_(settings.clubId), { muteHttpExceptions: true, followRedirects: true });
   if (res.getResponseCode() !== 200) throw new Error('fotball.no svarte ' + res.getResponseCode());
 
@@ -381,12 +452,39 @@ function parseIcsDate_(v) {
 
 // ---------------------------------------------------------------- REGNEARK -
 
-function locateTable_() {
+/**
+ * Finner terminlist-arket.
+ *
+ * Arket kan hete hva som helst. Står "Ark" i config, brukes det navnet. Ellers
+ * letes det opp på innhold: første ark som ikke er config og som har en
+ * "Turnering"-overskrift øverst. Å lete etter overskriften i stedet for å ta
+ * det første arket gjør at en notatfane foran i rekka ikke velter synken.
+ *
+ * Har du kopier av terminlisten som sikkerhetskopi, ser de like ut som
+ * originalen for denne letingen, og den første vinner. Da er det verdt å sette
+ * "Ark" i config, så er det ingen tvil om hvilken fane som skrives til.
+ */
+function locateTable_(settings) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = CONFIG.SHEET_NAME
-    ? ss.getSheetByName(CONFIG.SHEET_NAME)
-    : ss.getSheets().filter(function (sh) { return sh.getName() !== CONFIG.CONFIG_SHEET; })[0];
-  if (!sheet) throw new Error('Fant ikke arket "' + CONFIG.SHEET_NAME + '"');
+  const named = (settings && settings.sheetName) || CONFIG.SHEET_NAME;
+
+  let sheet = null;
+  if (named) {
+    sheet = ss.getSheetByName(named);
+    if (!sheet) {
+      throw new Error('Fant ikke arket "' + named + '". Sjekk "Ark" i arket "' +
+                      CONFIG.CONFIG_SHEET + '". Faner som finnes: ' +
+                      ss.getSheets().map(function (s) { return s.getName(); }).join(', '));
+    }
+  } else {
+    const candidates = ss.getSheets().filter(function (sh) { return sh.getName() !== CONFIG.CONFIG_SHEET; });
+    sheet = candidates.filter(hasFixtureHeader_)[0];
+    if (!sheet) {
+      throw new Error('Fant ingen fane med en "Turnering"-overskrift. Sett "Ark" i arket "' +
+                      CONFIG.CONFIG_SHEET + '". Faner som finnes: ' +
+                      candidates.map(function (s) { return s.getName(); }).join(', '));
+    }
+  }
 
   const range = sheet.getDataRange();
   const values = range.getValues();
@@ -413,8 +511,8 @@ function locateTable_() {
            rows: values.slice(headerRow + 1), formulas: formulas.slice(headerRow + 1) };
 }
 
-function readTable_() {
-  const t = locateTable_();
+function readTable_(sheetName) {
+  const t = locateTable_({ sheetName: sheetName || '' });
   const rows = [];
   t.rows.forEach(function (r, i) {
     if (isBlank_(r)) return;
@@ -456,9 +554,9 @@ function writeCell_(sheet, row, colIdx, value, colName, existing) {
 
 // ------------------------------------------------------------- SYNKPLAN ----
 
-function buildPlan_() {
-  const settings = loadSettings_();
-  const t = locateTable_();
+function buildPlan_(profile) {
+  const settings = profile || loadProfiles_()[0];
+  const t = locateTable_(settings);
   const fixtures = fetchFixtures_(settings);
 
   const byKey = {};
@@ -542,15 +640,22 @@ function buildPlan_() {
     });
   });
 
-  // Sikring. Å legge til mange rader på én gang betyr nesten alltid at
-  // gjenkjenningen har sviktet — riktig terminliste endrer seg noen kamper av
-  // gangen. Uten denne bremsen ender et slikt uhell som en dublett av hele
-  // terminlisten, og det er tungt å rydde opp i for hånd.
+  // Sikring mot å dublere hele terminlisten. Faren er ikke at det kommer mange
+  // nye kamper — det gjør det når et ark fylles for første gang, eller når et
+  // lag melder seg på en ny serie. Faren er at radene som ALLEREDE står der
+  // ikke ble kjent igjen, for da legges de inn på nytt ved siden av seg selv.
+  //
+  // Derfor ser vi på hvor stor andel av de eksisterende radene som fant kampen
+  // sin. Et tomt ark har ingen rader å miste og utløser aldri sperren.
+  const existingRows = pending.length;
+  const matchedRows = pending.filter(function (p) { return p.fixture; }).length;
   const ceiling = Math.max(3, Math.round(0.25 * fixtures.length));
-  const suspect = additions.length > ceiling;
+  const suspect = additions.length > ceiling && existingRows > 0 && matchedRows * 2 < existingRows;
 
   return {
     generatedAt: Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'dd.MM.yyyy HH:mm'),
+    sheetName: t.sheet.getName(),
+    notifyEmail: settings.notifyEmail,
     feedCount: fixtures.length,
     teams: settings.teams,
     sortAfterSync: settings.sortAfterSync,
@@ -562,9 +667,13 @@ function buildPlan_() {
     resolved: resolved,
     conflicts: conflicts,
     suspect: suspect,
+    existingRows: existingRows,
+    matchedRows: matchedRows,
     suspectReason: suspect
-      ? additions.length + ' nye rader mot ' + fixtures.length + ' kamper i strømmen. Det ser ut som ' +
-        'gjenkjenningen har sviktet, ikke som en ekte endring. Rader legges ikke til før dette er sett på.'
+      ? 'Bare ' + matchedRows + ' av ' + existingRows + ' rader som allerede står i arket ble kjent ' +
+        'igjen i strømmen, samtidig som ' + additions.length + ' kamper vil legges til. Det ser ut som ' +
+        'gjenkjenningen har sviktet — da ville radene blitt lagt inn på nytt ved siden av seg selv. ' +
+        'Sjekk "Lag" i arket "' + CONFIG.CONFIG_SHEET + '" før du kjører videre.'
       : null
   };
 }
@@ -590,7 +699,7 @@ function filterPlan_(plan, only, exclude) {
 }
 
 function applyPlan_(plan) {
-  const t = locateTable_();
+  const t = locateTable_({ sheetName: plan.sheetName });
   const warnings = [];
   let cellsWritten = 0;
 
@@ -626,7 +735,7 @@ function applyPlan_(plan) {
   let sort = { sorted: false, reason: 'ikke bedt om' };
   if (plan.sortAfterSync && (cellsWritten || rowsAdded)) {
     // Ny tabellstruktur etter innsetting, så les den om igjen før sortering.
-    sort = sortByDato_(locateTable_());
+    sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
     if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
   }
 
@@ -689,7 +798,7 @@ function sortByDato_(t) {
 // ------------------------------------------------------------- FRAMSTILLING -
 
 function renderPlan_(plan) {
-  const L = [];
+  const L = ['TERMINLISTE: ' + plan.sheetName, ''];
   if (plan.suspect) {
     L.push('!! ADVARSEL');
     L.push('   ' + plan.suspectReason);
@@ -744,7 +853,7 @@ function renderPlan_(plan) {
     plan.missingFromFeed.forEach(function (m) { L.push('  rad ' + m.row + '  ' + m.label); });
     L.push('');
   }
-  if (!L.length) L.push('Ingen endringer. Arket er i takt med fotball.no (' + plan.feedCount + ' kamper).');
+  if (L.length === 2) L.push('Ingen endringer. Arket er i takt med fotball.no (' + plan.feedCount + ' kamper).');
   L.push('');
   L.push('Lag som følges (arket "' + CONFIG.CONFIG_SHEET + '"): ' + (plan.teams || []).join(', '));
   return L.join('\n');

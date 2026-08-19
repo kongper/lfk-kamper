@@ -124,7 +124,7 @@ const G16_3 = {
 };
 
 let CONFIG_ROWS = [
-  ['Nøkkel', 'Verdi'],
+  ['Nøkkel', 'Kamper'],
   ['Klubb-ID', '1683'],
   ['Lag', 'Lillehammer G15-1'],
   ['Lag', 'Lillehammer G15-2'],
@@ -164,11 +164,17 @@ const sandbox = {
     getActiveSpreadsheet: () => ({
       getNumSheets: () => 2,
       insertSheet: () => { throw new Error('config sheet already exists in this harness'); },
-      getSheetByName: (n) => n === 'config' ? {
-        getName: () => 'config',
-        getDataRange: () => ({ getValues: () => CONFIG_ROWS })
-      } : null,
-      getSheets: () => [{
+      getSheetByName: (n) => n === 'config'
+        ? { getName: () => 'config', getDataRange: () => ({ getValues: () => CONFIG_ROWS }) }
+        : n === 'Kamper' ? MAIN
+        : (sandbox.WITH_DECOY && n === 'Notater') ? DECOY
+        : null,
+      getSheets: () => (sandbox.WITH_DECOY ? [DECOY] : []).concat([MAIN]),
+    })
+  }
+};
+
+const MAIN = {
         getName: () => 'Kamper',
         getDataRange: () => ({
           getValues: () => sheetValues,
@@ -186,9 +192,16 @@ const sandbox = {
               (sandbox.FORMULAS_ON && (c - 1 + ci) === C['Ny dato']) ? '=B2' : '')),
           sort: (spec) => { sandbox.SORTED = spec; }
         })
-      }]
-    })
-  }
+};
+
+// A tab sitting in front of the fixture sheet with no Turnering header —
+// notes, a chart, anything. It must not be mistaken for the fixture table.
+const DECOY = {
+  getName: () => 'Notater',
+  getLastRow: () => 2,
+  getLastColumn: () => 2,
+  getDataRange: () => ({ getValues: () => [['Huskeliste', ''], ['ringe dommer', '']], getFormulas: () => [['', ''], ['', '']] }),
+  getRange: () => ({ getValues: () => [['Huskeliste', ''], ['ringe dommer', '']] })
 };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(__dirname + '/../../src/Code.js', 'utf8'), sandbox);   // also a syntax check
@@ -222,7 +235,7 @@ const keys = sandbox.FEED.map(f => sandbox.matchKey_(f.serie, f.homeLong, f.away
 check('all 39 feed fixtures have distinct keys', new Set(keys).size, keys.length);
 
 console.log('\n--- buildPlan_: matching survives the short/long name switch ---');
-const plan = sandbox.buildPlan_();
+const plan = sandbox.buildPlans_()[0];
 check('no rows treated as new', plan.additions.length, 0);
 check('not flagged as suspect', plan.suspect, false);
 // The two played rows are absent from the feed, but they are in the past, so
@@ -245,7 +258,7 @@ check('Lørenskog: Dato takes the feed value',
 
 console.log('\n--- formula protection ---');
 sandbox.FORMULAS_ON = true;
-const lorF = sandbox.buildPlan_().updates.find(u => /Lørenskog/.test(u.label));
+const lorF = sandbox.buildPlans_()[0].updates.find(u => /Lørenskog/.test(u.label));
 check('a formula in Ny dato is left alone',
   lorF.changes.map(c => c.column).filter(c => c !== 'Hjemmelag' && c !== 'Bortelag').sort(),
   ['Dag', 'Dato', 'Tid']);
@@ -268,10 +281,22 @@ longSheet.slice(1).forEach(r => {
   r[C['Bortelag']] = longOf(r[C['Bortelag']], serie);
 });
 const original = sheetValues.splice(0, sheetValues.length, ...longSheet);
-const plan2 = sandbox.buildPlan_();
+const plan2 = sandbox.buildPlans_()[0];
 check('re-running against long names finds no new rows', plan2.additions.length, 0);
 check('and proposes no further name churn', plan2.nameChanges.length, 0);
 sheetValues.splice(0, sheetValues.length, ...original);
+
+console.log('\n--- filling an empty sheet is not a duplication risk ---');
+// A brand new fixture tab: header row only. Everything in the feed is new, and
+// that is exactly right — there are no existing rows to fail to recognise.
+const FULL = sheetValues.slice(1).map(r => r.slice());
+sheetValues.splice(1, sheetValues.length - 1);
+const planEmpty = sandbox.buildPlans_('Kamper')[0];
+check('every fixture is queued for insertion', planEmpty.additions.length, sandbox.FEED.length);
+check('and it is NOT flagged as suspect', planEmpty.suspect, false);
+appended = [];
+check('so the rows actually get written', sandbox.applyPlan_(planEmpty).rowsAdded, sandbox.FEED.length);
+sheetValues.splice(1, sheetValues.length - 1, ...FULL);
 
 console.log('\n--- safety rail against mass duplication ---');
 // Simulate the failure that actually happened: nothing matches, so every
@@ -280,8 +305,10 @@ console.log('\n--- safety rail against mass duplication ---');
 // is the realistic way total mismatch happens (CONFIG.SERIES going stale
 // after an age-group change).
 sandbox.FEED = makeFeed().map(f => ({ ...f, serie: f.serie + ' 2027', homeLong: 'Zzz ' + f.homeLong }));
-const planBad = sandbox.buildPlan_();
+const planBad = sandbox.buildPlans_()[0];
 check('a whole-feed mismatch is flagged as suspect', planBad.suspect, true);
+check('  ... and the reason counts unrecognised rows, not new ones',
+  [planBad.matchedRows, planBad.existingRows], [0, 41]);
 appended = [];
 const resBad = sandbox.applyPlan_(planBad);
 check('  ... and no rows are appended', [resBad.rowsAdded, appended.length], [0, 0]);
@@ -294,13 +321,13 @@ sandbox.FEED = makeFeed();
 
 console.log('\n--- team filter from the config sheet ---');
 sandbox.FEED = makeFeed().concat([G16_3]);
-const planTeams = sandbox.buildPlan_();
+const planTeams = sandbox.buildPlans_()[0];
 check('G16-3 is not picked up by the four exact team names', planTeams.additions.length, 0);
 check('the followed teams are reported back', planTeams.teams.length, 4);
 
 CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag')
   .concat([['Lag', 'Lillehammer G15'], ['Lag', 'Lillehammer G16']]);
-const planBroad = sandbox.buildPlan_();
+const planBroad = sandbox.buildPlans_()[0];
 check('broadening the prefix to "Lillehammer G16" pulls G16-3 in',
   planBroad.additions.map(a => a.home), ['Lillehammer G16-3']);
 check('  ... and one new fixture is not mistaken for a mass insert', planBroad.suspect, false);
@@ -308,6 +335,53 @@ CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat([
   ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
   ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2']]);
 sandbox.FEED = makeFeed();
+
+console.log('\n--- one config column per fixture sheet ---');
+// A second column, headed with a sheet name, is a second terminliste.
+const SAVED = CONFIG_ROWS.map(r => r.slice());
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper', 'J13 2026'],
+  ['Klubb-ID', '1683', '1683'],
+  ['Lag', 'Lillehammer G15-1', 'Lillehammer J13-1'],
+  ['Lag', 'Lillehammer G15-2', ''],
+  ['Lag', 'Lillehammer G16-1', ''],
+  ['Lag', 'Lillehammer G16-2', ''],
+  ['Varsle e-post', 'en@epost.no', 'to@epost.no'],
+  ['Sorter etter dato', 'ja', 'nei']
+];
+const profs = sandbox.loadProfiles_();
+check('two columns give two profiles', profs.length, 2);
+check('the column header names the sheet', profs.map(p => p.sheetName), ['Kamper', 'J13 2026']);
+check('teams are read down each column, ragged lengths fine',
+  profs.map(p => p.teams.length), [4, 1]);
+check('each sheet keeps its own recipient',
+  profs.map(p => p.notifyEmail), ['en@epost.no', 'to@epost.no']);
+check('and its own sort setting', profs.map(p => p.sortAfterSync), [true, false]);
+check('a named sheet filter selects one profile',
+  sandbox.buildPlans_('Kamper').map(p => p.sheetName), ['Kamper']);
+check('an unknown sheet name is an error, not silence', (() => {
+  try { sandbox.buildPlans_('Finnes ikke'); return false; } catch (e) { return /Finnes ikke/.test(e.message); }
+})(), true);
+check('plans carry the sheet they belong to', sandbox.buildPlans_('Kamper')[0].sheetName, 'Kamper');
+
+// The old single-column layout still has to load.
+CONFIG_ROWS = [['Nøkkel', 'Verdi'], ['Klubb-ID', '1683'], ['Lag', 'Lillehammer G15-1']];
+const legacy = sandbox.loadProfiles_();
+check('the old "Verdi" column still loads', legacy.length, 1);
+check('  ... and falls back to finding the sheet by content', legacy[0].sheetName, '');
+CONFIG_ROWS = SAVED;
+
+console.log('\n--- finding the fixture sheet ---');
+sandbox.WITH_DECOY = true;
+check('a tab without a Turnering header is skipped',
+  sandbox.locateTable_({}).sheet.getName(), 'Kamper');
+check('the fixture tab can be named anything',
+  sandbox.locateTable_({}).col['Turnering'] !== undefined, true);
+check('a wrong "Ark" name fails loudly and lists the tabs', (() => {
+  try { sandbox.locateTable_({ sheetName: 'Finnes ikke' }); return 'no error'; }
+  catch (e) { return /Finnes ikke/.test(e.message) && /Notater, Kamper/.test(e.message); }
+})(), true);
+sandbox.WITH_DECOY = false;
 
 console.log('\n--- sorting by Dato ---');
 // Shuffle the sheet so a sort has something to do, then sort it back.

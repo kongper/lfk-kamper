@@ -160,18 +160,28 @@ work the user was doing by hand.
 
 ## Configuration lives in the sheet
 
-A `config` tab holds the settings as key/value rows, and a key may repeat —
-that is how `Lag` becomes a list.
+The `config` tab holds **one column per fixture sheet**, and the column header
+is the name of the tab it drives. One spreadsheet can therefore carry several
+squads, each with its own teams, recipient and sort setting.
 
-| Nøkkel | Verdi |
-|---|---|
-| Klubb-ID | 1683 |
-| Lag | Lillehammer G15-1 |
-| Lag | Lillehammer G15-2 |
-| Lag | Lillehammer G16-1 |
-| Lag | Lillehammer G16-2 |
-| Varsle e-post | din@epost.no |
-| Sorter etter dato | ja |
+| Nøkkel | kampoppsett_2026 | J13 2026 |
+|---|---|---|
+| Klubb-ID | 1683 | 1683 |
+| Lag | Lillehammer G15-1 | Lillehammer J13-1 |
+| Lag | Lillehammer G15-2 | |
+| Lag | Lillehammer G16-1 | |
+| Lag | Lillehammer G16-2 | |
+| Varsle e-post | din@epost.no | annen@epost.no |
+| Sorter etter dato | ja | ja |
+
+A key may repeat down the rows — that is how `Lag` becomes a list — and blank
+cells just mean that column does not use that row, so columns need not be the
+same length.
+
+Every command works across all sheets. `preview` returns `plans`, one per
+column; `apply` returns `results`. Pass `--sheet "<name>"` to work on one.
+Report each sheet under its own heading — the user is looking at several
+squads, and an undifferentiated list of changes is unreadable.
 
 **`Lag` is a prefix, and the scope is deliberately narrow.** The club also has a
 `Lillehammer G16-3`, playing a series this sheet does not track, so a prefix of
@@ -220,11 +230,13 @@ If a club is renamed outright, the name key misses, so there is a second pass
 on series + `Dato`. Rows recovered that way are re-labelled from the feed and
 reported under `nameChanges`.
 
-**The mass-insert guard.** If more than a quarter of the feed would be appended
-as new, `preview` sets `suspect` with a `suspectReason`, and `apply` writes the
-updates but refuses the additions. Treat that as a matching failure, not a real
-schedule change — a genuine fixture list moves a few matches at a time. The
-usual cause is `CONFIG.SERIES` having gone stale after an age-group change.
+**The mass-insert guard.** It fires when a large batch of insertions coincides
+with *existing rows failing to match* — `matchedRows` well under `existingRows`
+in the plan. Filling an empty sheet for the first time is all insertions and no
+unmatched rows, so it passes straight through, as it should. When the guard does
+fire, `preview` sets `suspect` with a `suspectReason`, and `apply` writes the
+updates but holds the additions. Treat it as a matching failure: the usual cause
+is the `Lag` list in `config` having gone stale after an age-group change.
 Diagnose it before reaching for `--force`, and never use `--force` without
 saying plainly what it will insert.
 
@@ -277,10 +289,11 @@ group and the team names changed. Run `config` to see what is loaded.
 **Times are local.** If every kickoff looks an hour off, the Apps Script
 project timezone is wrong, not the feed.
 
-**The script works on the first tab** unless `CONFIG.SHEET_NAME` names one.
-The user keeps backup copies of the fixture tab, so if a sync reports something
-that does not match what they are looking at, check which sheet `ping` names
-before assuming a logic bug.
+**A fixture tab is addressed by its config column header.** If a column is
+headed with a name no tab matches, that sheet fails loudly and lists the tabs it
+did find. The legacy single-column layout (header `Verdi`) still loads and falls
+back to finding the tab by content — the first tab that is not `config` and has
+a `Turnering` header.
 
 **Team names are rewritten to fotball.no's spelling on every sync.** The first
 run after a sheet has been kept in short names therefore proposes a name change

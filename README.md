@@ -45,10 +45,12 @@ That is what let the sheet switch from short names to fotball.no's full spelling
 without losing a single row.
 
 **Appending is the dangerous direction.** A wrong update is one visible cell; a
-wrong append is 39 duplicate rows and a manual cleanup. So if more than a
-quarter of the feed would be appended as new, the sync writes the updates,
-refuses the insertions, and says why. That is nearly always a matching failure —
-usually the team list in `config` having gone stale after an age-group change.
+wrong append is 39 duplicate rows and a manual cleanup. The guard against that
+does not count *new* rows — a fresh sheet is all-new, and so is a team entering
+a new series. It counts how many rows *already in the sheet* failed to be
+recognised. When most of them go unmatched while a pile of insertions is queued,
+the sync writes the updates, refuses the insertions, and says so. That pattern
+means matching broke, usually a stale `Lag` list after an age-group change.
 
 ## Layout
 
@@ -94,19 +96,33 @@ times, so a wrong timezone shifts every match by an hour.
 
 ## Configuration
 
-Everything club-specific lives in the `config` tab, as key/value rows. A key may
-repeat, which is how `Lag` becomes a list.
+Everything club-specific lives in the `config` tab, which holds **one column per
+fixture sheet**. The column header is the name of the tab it drives, so a single
+spreadsheet can track several squads independently.
 
-| Nøkkel | Verdi |
-|---|---|
-| Klubb-ID | 1683 |
-| Lag | Lillehammer G15-1 |
-| Lag | Lillehammer G15-2 |
-| Varsle e-post | din@epost.no |
-| Sorter etter dato | ja |
+| Nøkkel | kampoppsett_2026 | J13 2026 |
+|---|---|---|
+| Klubb-ID | 1683 | 1683 |
+| Lag | Lillehammer G15-1 | Lillehammer J13-1 |
+| Lag | Lillehammer G15-2 | |
+| Lag | Lillehammer G16-1 | |
+| Lag | Lillehammer G16-2 | |
+| Varsle e-post | din@epost.no | annen@epost.no |
+| Sorter etter dato | ja | ja |
+
+A key may repeat down the rows — that is how `Lag` becomes a list — and blank
+cells simply mean that column does not use that row. Each column gets its own
+nightly mail, so different squads can go to different people.
 
 `Klubb-ID` is the `fiksId` in your club's fotball.no URL:
 `fotball.no/fotballdata/klubb/hjem/?fiksId=1683`.
+
+Fixture tabs can be called anything — the column header is what points at them.
+A header naming a tab that does not exist fails immediately and lists the tabs
+that do, rather than writing somewhere unexpected.
+
+The older single-column layout (header `Verdi`) still loads, and finds its tab
+by content: the first tab that isn't `config` and has a `Turnering` header.
 
 `Lag` is matched as a **prefix**, so `Lillehammer G16` catches `G16-1`, `G16-2`
 *and* `G16-3`. Be as specific as the teams you actually want.
@@ -138,8 +154,9 @@ URL and token in `~/.lfk-kamper.json`:
 ```
 
 ```bash
-python3 skill/scripts/lfk.py preview   # read-only diff
-python3 skill/scripts/lfk.py apply     # write it
+python3 skill/scripts/lfk.py preview                  # read-only diff, all sheets
+python3 skill/scripts/lfk.py preview --sheet "J13 2026"
+python3 skill/scripts/lfk.py apply                    # write it
 ```
 
 ## Tests

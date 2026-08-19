@@ -12,6 +12,7 @@ Bruk:
     python3 lfk.py apply --exclude "<kampnokkel>"   # alt unntatt én omstridt kamp
     python3 lfk.py apply --only "<kampnokkel>"      # bare denne
     python3 lfk.py apply --force                    # overstyr sperren mot masseinnlegging
+    python3 lfk.py preview --sheet "J13 2026"       # bare én terminliste
 
 Legitimasjon leses i denne rekkefølgen:
     1. Miljøvariablene LFK_URL og LFK_TOKEN
@@ -57,8 +58,10 @@ def load_config():
     )
 
 
-def call(action, url, token, only=None, exclude=None, force=False, timeout=120):
+def call(action, url, token, only=None, exclude=None, force=False, sheet=None, timeout=120):
     req_body = {"token": token, "action": action}
+    if sheet:
+        req_body["sheet"] = sheet
     if force:
         req_body["forceAdditions"] = True
     if only:
@@ -166,16 +169,18 @@ def diagnose_401(url, code):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in ACTIONS:
-        sys.exit("Bruk: lfk.py {%s} [--only NOKKEL] [--exclude NOKKEL] [--force]" % "|".join(ACTIONS))
+        sys.exit("Bruk: lfk.py {%s} [--sheet NAVN] [--only NOKKEL] [--exclude NOKKEL] [--force]" % "|".join(ACTIONS))
 
     action = sys.argv[1]
-    only = exclude = None
+    only = exclude = sheet = None
     force = False
     args = sys.argv[2:]
     while args:
         flag = args.pop(0)
         if flag == "--force":
             force = True
+        elif flag == "--sheet" and args:
+            sheet = args.pop(0)
         elif flag in ("--only", "--exclude") and args:
             ids = [x.strip() for x in args.pop(0).split(",") if x.strip()]
             if flag == "--only":
@@ -188,7 +193,7 @@ def main():
         sys.exit("Bruk enten --only eller --exclude, ikke begge.")
 
     url, token = load_config()
-    result = call(action, url, token, only=only, exclude=exclude, force=force)
+    result = call(action, url, token, only=only, exclude=exclude, force=force, sheet=sheet)
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result.get("ok"):

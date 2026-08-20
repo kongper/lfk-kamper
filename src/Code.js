@@ -7,27 +7,17 @@
  * KOLONNER
  *
  * Påkrevd: Dato, Hjemmelag, Bortelag, Turnering — de tre siste kjenner igjen
- * raden, Dato fester kampen i tid. Alt annet er valgfritt, og en kolonne som
- * ikke finnes blir hverken lest eller skrevet.
+ * raden, Dato fester kampen i tid. Dag, Tid, Bane og Kommentar er valgfrie, og
+ * en kolonne som ikke finnes blir hverken lest eller skrevet.
  *
- * ARBEIDSDELINGEN MELLOM DE TO DATOKOLONNENE
+ *   Dato, Dag, Tid, Bane   følger alltid fotball.no.
+ *   Hjemmelag, Bortelag    skrives med fotball.no sin egen skrivemåte, ordrett
+ *                          ("Nordre Land IL/Torpa IL G15-2").
+ *   Kommentar              røres aldri. Dette er din kolonne — her fører du
+ *                          avtalte flyttinger og alt annet synken ikke skal
+ *                          bry seg med.
  *
- *   Dato     = det fotball.no sier. Skrives alltid.
- *   Ny dato  = det dere har avtalt, og som ikke nødvendigvis er registrert
- *              i FIKS ennå. Dette er menneskets kolonne, og den er valgfri —
- *              uten den finnes ingen lokale avtaler, og alt følger fotball.no.
- *
- * En rad der de to er ulike har en lokal avtale på seg. Den avtalen er hele
- * poenget med kolonnen, og synken skal ikke kunne rive den bort. Derfor:
- *
- *   Ny dato  skrives bare når den i utgangspunktet speiler Dato — altså når
- *            det ikke ligger noen avtale der å ødelegge. Formler røres aldri.
- *   Dag      følger datoen dere faktisk spiller. På rader med lokal avtale
- *            står den til Ny dato og røres ikke.
- *   Tid, Bane følger alltid fotball.no.
- *   Hjemmelag, Bortelag skrives med fotball.no sin egen skrivemåte, ordrett
- *            slik den står i kalenderen ("Nordre Land IL/Torpa IL G15-2").
- *   Kommentar røres aldri.
+ * En celle som inneholder en formel blir aldri overskrevet, uansett kolonne.
  *
  * HVORDAN RADER GJENKJENNES
  *
@@ -71,7 +61,8 @@ const CONFIG = {
       'Lillehammer G16-2'
     ],
     'Varsle e-post': ['din@epost.no'],
-    'Sorter etter dato': ['ja']
+    'Sorter etter dato': ['ja'],
+    'Formater rader': ['alle']
   }
 };
 
@@ -79,10 +70,10 @@ function feedUrl_(clubId) {
   return 'https://www.fotball.no/footballapi/Calendar/GetCalendarForClub?clubId=' + clubId;
 }
 
-const COLS = ['Kommentar', 'Dato', 'Ny dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering'];
+const COLS = ['Kommentar', 'Dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering'];
 // Bare det som trengs for å kjenne igjen en rad og feste en dato på den.
-// Alt annet — Ny dato, Dag, Tid, Bane, Kommentar — er valgfritt, og en kolonne
-// som ikke finnes blir hverken lest eller skrevet.
+// Alt annet — Dag, Tid, Bane, Kommentar — er valgfritt, og en kolonne som ikke
+// finnes blir hverken lest eller skrevet.
 const REQUIRED_COLS = ['Dato', 'Hjemmelag', 'Bortelag', 'Turnering'];
 const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag', 'lørdag'];
 
@@ -138,7 +129,15 @@ function loadProfiles_() {
       (raw[key] = raw[key] || []).push(val);
     }
     if (!Object.keys(raw).length) continue;          // tom kolonne, hopp over
-    profiles.push(buildProfile_(norm_(header[c]) === 'verdi' ? '' : header[c], raw));
+    const prof = buildProfile_(norm_(header[c]) === 'verdi' ? '' : header[c], raw);
+    // Hvor Lag-cellene står, så formatet deres kan leses senere.
+    prof.teamCells = [];
+    for (var r2 = 1; r2 < values.length; r2++) {
+      if (norm_(values[r2][0]) !== 'lag') continue;
+      const v = String(values[r2][c]).trim();
+      if (v) prof.teamCells.push({ team: v, row: r2 + 1, col: c + 1 });
+    }
+    profiles.push(prof);
   }
   return profiles.length ? profiles : [buildProfile_('', {})];
 }
@@ -158,7 +157,8 @@ function buildProfile_(sheetName, raw) {
     clubId: (pick('Klubb-ID') || ['1683'])[0],
     teams: teams,
     notifyEmail: (pick('Varsle e-post') || [''])[0],
-    sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0])
+    sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0]),
+    formatMode: norm_((pick('Formater rader') || ['alle'])[0])
   };
 }
 
@@ -243,32 +243,6 @@ function setup() {
   return msg;
 }
 
-/**
- * Engangsopprydding: fjerner kolonnene "Varsling" og "KampID".
- *
- * Kjøres fra editoren, ikke fra menyen — den sletter data, og da skal det
- * være et bevisst valg og ikke noe man kommer borti. Sletter bare kolonner
- * som heter nøyaktig dette, og sier fra hva den gjorde.
- */
-function ryddKolonner() {
-  const t = locateTable_(loadProfiles_()[0]);
-  const doomed = ['Varsling', 'KampID'];
-  const found = [];
-  t.header.forEach(function (h, i) {
-    if (doomed.some(function (d) { return norm_(d) === norm_(h); })) found.push({ name: h, idx: i });
-  });
-  if (!found.length) { Logger.log('Fant ingen av kolonnene ' + doomed.join(', ') + '. Ingenting gjort.'); return; }
-
-  // Bakfra, ellers forskyver hver sletting indeksene til de neste.
-  found.sort(function (a, b) { return b.idx - a.idx; })
-       .forEach(function (c) { t.sheet.deleteColumn(c.idx + 1); });
-
-  const msg = 'Slettet: ' + found.map(function (c) { return c.name; }).join(', ') +
-              '. Arket "' + t.sheet.getName() + '" har nå ' + t.sheet.getLastColumn() + ' kolonner.';
-  Logger.log(msg);
-  return msg;
-}
-
 // ------------------------------------------------------------- MENY I ARKET -
 // Menyfunksjoner kan ikke ha understrek til slutt — Apps Script regner slike
 // navn som private og nekter å kalle dem fra en meny.
@@ -277,6 +251,8 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('LFK kamper')
     .addItem('Forhåndsvis synk', 'menuPreview')
     .addItem('Kjør synk', 'menuApply')
+    .addSeparator()
+    .addItem('Formater rader etter lag', 'menuFormat')
     .addToUi();
 }
 
@@ -299,11 +275,28 @@ function menuApply() {
     return [plan.sheetName + ':',
             '  Rader oppdatert: ' + res.rowsUpdated + ', lagt til: ' + res.rowsAdded,
             res.sort && res.sort.sorted ? '  Sortert på Dato (' + res.sort.how + ')' : '',
+            res.format && res.format.formatted ? '  Formatert: ' + res.format.formatted + ' rader' : '',
             res.additionsHeld ? '  NYE RADER HOLDT TILBAKE — se advarselen i forhåndsvisningen.' : '',
             res.warnings.length ? '  Advarsler:\n   - ' + res.warnings.join('\n   - ') : ''
            ].filter(Boolean).join('\n');
   });
   showText_('Synk fullført', lines.join('\n\n'));
+}
+
+function menuFormat() {
+  const lines = loadProfiles_().map(function (prof) {
+    const res = applyRowFormats_(locateTable_(prof), prof);
+    return prof.sheetName + ': ' + (res.teams
+      ? res.formatted + ' rader formatert etter ' + res.teams + ' lag (' + res.mode + ')'
+      : res.mode === 'markerte'
+        ? 'ingen Lag-celler er markert — sett "Formater rader" til "alle" hvis du bare har ramme'
+        : 'formatering er slått av ("Formater rader" = nei)');
+  });
+  showText_('Formatering', lines.join('\n') + '\n\n' +
+    'Formatet hentes fra Lag-cellene i arket "' + CONFIG.CONFIG_SHEET + '".\n' +
+    'Gi cellen bakgrunn, tekstfarge, ramme, fet, kursiv eller understrek — så\n' +
+    'følger radene til det laget etter. Datokolonnene beholder sine egne farger\n' +
+    'og tallformat, men får rammen.');
 }
 
 function showText_(title, body) {
@@ -336,6 +329,9 @@ function doPost(e) {
         .filter(function (p) { return !body.sheet || norm_(p.sheetName) === norm_(body.sheet); })
         .map(function (p) { return { sheet: p.sheetName, fixtures: fetchFixtures_(p) }; }) });
       case 'config':  return json_({ ok: true, action: 'config', profiles: loadProfiles_() });
+      case 'format': return json_({ ok: true, action: 'format', results: loadProfiles_()
+        .filter(function (p) { return !body.sheet || norm_(p.sheetName) === norm_(body.sheet); })
+        .map(function (p) { return { sheet: p.sheetName, result: applyRowFormats_(locateTable_(p), p) }; }) });
       case 'preview': return json_({ ok: true, action: 'preview', plans: buildPlans_(body.sheet) });
       case 'apply': {
         const results = buildPlans_(body.sheet).map(function (plan) {
@@ -360,8 +356,7 @@ function json_(obj) {
 
 function nightly() {
   buildPlans_().forEach(function (plan) {
-    const notable = plan.updates.length + plan.additions.length +
-                    plan.missingFromFeed.length + plan.resolved.length + plan.conflicts.length;
+    const notable = plan.updates.length + plan.additions.length + plan.missingFromFeed.length;
     if (notable === 0) return;
 
     const res = applyPlan_(plan);
@@ -565,6 +560,118 @@ function writeCell_(sheet, row, colIdx, value, colName, existing) {
   range.setValue(value);
 }
 
+// ------------------------------------------------------------ FORMATERING --
+
+// Egenskapene som leses for å avgjøre om en Lag-celle er markert, og som
+// datokolonnene får tilbake etterpå. Rammer står ikke på lista: Apps Script
+// kan sette dem, men ikke lese dem, så en celle som BARE har ramme og ingen
+// annen markering blir ikke oppdaget. Gi cellen en farge også.
+const CELL_PROPS = [
+  { one: 'getBackground',          many: 'getBackgrounds',          set: 'setBackgrounds',          blank: '#ffffff' },
+  { one: 'getFontColor',           many: 'getFontColors',           set: 'setFontColors',           blank: '#000000' },
+  { one: 'getFontWeight',          many: 'getFontWeights',          set: 'setFontWeights',          blank: 'normal' },
+  { one: 'getFontStyle',           many: 'getFontStyles',           set: 'setFontStyles',           blank: 'normal' },
+  { one: 'getFontLine',            many: 'getFontLines',            set: 'setFontLines',            blank: 'none' },
+  { one: 'getFontFamily',          many: 'getFontFamilies',         set: 'setFontFamilies',         blank: null },
+  { one: 'getFontSize',            many: 'getFontSizes',            set: 'setFontSizes',            blank: null },
+  { one: 'getHorizontalAlignment', many: 'getHorizontalAlignments', set: 'setHorizontalAlignments', blank: null }
+];
+
+/**
+ * Finner Lag-cellene som skal styre utseendet på radene.
+ *
+ * "Formater rader" i config avgjør hvilke som teller:
+ *
+ *   alle      (standard) — hver Lag-celle styrer radene sine, også de som ser
+ *               umarkerte ut. Dette er den eneste innstillingen der en ramme
+ *               alltid følger med, siden Apps Script ikke kan lese rammer og
+ *               en celle med bare ramme ellers ville sett tom ut. Prisen er at
+ *               config bestemmer alt: formatering du har gjort direkte i
+ *               radene blir overskrevet ved neste synk.
+ *   markerte  — bare celler som har en synlig markering (farge, fet, kursiv,
+ *               understrek, skrift eller justering). Rader for lag med en
+ *               umarkert celle får stå som de er. Trygt hvis du farger rader
+ *               for hånd, men da virker ikke ramme-alene.
+ *   nei       — ingen formatering i det hele tatt.
+ */
+function loadTeamFormats_(profile) {
+  const mode = profile.formatMode || 'alle';
+  if (mode === 'nei' || mode === 'no' || mode === 'av') return [];
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.CONFIG_SHEET);
+  if (!sheet || !profile.teamCells || !profile.teamCells.length) return [];
+
+  const base = {};
+  CELL_PROPS.forEach(function (p) { if (p.blank !== null) base[p.one] = p.blank; });
+
+  return profile.teamCells.map(function (tc) {
+    const cell = sheet.getRange(tc.row, tc.col);
+    const marked = Object.keys(base).some(function (getter) {
+      return norm_(cell[getter]()) !== norm_(base[getter]);
+    });
+    return { team: tc.team, prefix: norm_(tc.team), cell: cell, marked: marked };
+  }).filter(function (x) { return mode === 'markerte' ? x.marked : true; });
+}
+
+/**
+ * Gir hver rad formatet til laget sitt, ramme inkludert.
+ *
+ * Kopieringen går via arkets egen "lim inn bare format", som er den eneste
+ * veien som tar med rammer — Apps Script har ingen leser for dem. Den tar
+ * samtidig med seg tallformat, og det ville gjort datoer og klokkeslett om til
+ * tall. Derfor tas et bilde av tallformatene først og legges tilbake etterpå.
+ *
+ * Rammen skal gå rundt hele raden, så kopien treffer alle kolonner. Deretter
+ * får datokolonnene og Kommentar tilbake sitt eget utseende — farger, skrift og
+ * justering — mens rammen blir stående.
+ *
+ * Rader som ikke treffer noe lag røres ikke i det hele tatt.
+ */
+function applyRowFormats_(t, profile) {
+  const formats = loadTeamFormats_(profile);
+  if (!formats.length) return { formatted: 0, teams: 0, mode: profile.formatMode || 'alle' };
+
+  const first = t.headerRow + 2;
+  const rowCount = t.sheet.getLastRow() - first + 1;
+  const width = t.sheet.getLastColumn();
+  if (rowCount < 1 || width < 1) return { formatted: 0, teams: formats.length, mode: profile.formatMode || 'alle' };
+
+  // Datoene har sitt eget tallformat, og Kommentar er din kolonne — begge
+  // beholder sitt utseende. De får rammen, men ikke lagets farger.
+  const keepCols = ['Dato', 'Ny dato', 'Kommentar']
+    .map(function (n) { return t.col[n]; })
+    .filter(function (c) { return c !== undefined; });
+
+  const whole = t.sheet.getRange(first, 1, rowCount, width);
+  const numberFormats = whole.getNumberFormats();
+  const keepSnaps = keepCols.map(function (c) {
+    const r = t.sheet.getRange(first, c + 1, rowCount, 1);
+    return { col: c, range: r, props: CELL_PROPS.map(function (p) { return r[p.many](); }) };
+  });
+
+  let touched = 0;
+  for (var i = 0; i < rowCount; i++) {
+    const r = t.values[first - 1 + i];
+    if (!r || isBlank_(r)) continue;
+    const home = norm_(t.col['Hjemmelag'] !== undefined ? r[t.col['Hjemmelag']] : '');
+    const away = norm_(t.col['Bortelag'] !== undefined ? r[t.col['Bortelag']] : '');
+    const hit = formats.find(function (f) {
+      return home.indexOf(f.prefix) === 0 || away.indexOf(f.prefix) === 0;
+    });
+    if (!hit) continue;
+    hit.cell.copyFormatToRange(t.sheet, 1, width, first + i, first + i);
+    touched++;
+  }
+
+  if (touched) {
+    whole.setNumberFormats(numberFormats);
+    keepSnaps.forEach(function (snap) {
+      CELL_PROPS.forEach(function (p, pi) { snap.range[p.set](snap.props[pi]); });
+    });
+  }
+  return { formatted: touched, teams: formats.length, mode: profile.formatMode || 'alle' };
+}
+
 // ------------------------------------------------------------- SYNKPLAN ----
 
 function buildPlan_(profile) {
@@ -575,8 +682,25 @@ function buildPlan_(profile) {
   const byKey = {};
   fixtures.forEach(function (f) { byKey[f.key] = f; });
 
-  const updates = [], additions = [], missingFromFeed = [];
-  const localMoves = [], resolved = [], conflicts = [], nameChanges = [];
+  // "Lag" i config er prefikser. Rapporten skal vise lagene de faktisk traff —
+  // "Lillehammer Kv" sier lite, "Lillehammer Kvinner 1, Lillehammer Kvinner 2"
+  // sier hva synken jobber med. Et prefiks uten treff nevnes for seg: det er
+  // nesten alltid et lag som har byttet navn eller ikke har kamper igjen.
+  const resolved = {}, hitPrefix = {};
+  fixtures.forEach(function (f) {
+    [f.homeLong, f.awayLong].forEach(function (n) {
+      const nn = norm_(n);
+      settings.teams.forEach(function (pfx) {
+        if (nn.indexOf(norm_(pfx)) !== 0) return;
+        resolved[n] = true;
+        hitPrefix[pfx] = true;
+      });
+    });
+  });
+  const teamsResolved = Object.keys(resolved).sort();
+  const teamsWithoutMatch = settings.teams.filter(function (pfx) { return !hitPrefix[pfx]; });
+
+  const updates = [], additions = [], missingFromFeed = [], nameChanges = [];
   const taken = {};
   const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
 
@@ -592,8 +716,7 @@ function buildPlan_(profile) {
     row.home = cell('Hjemmelag');
     row.away = cell('Bortelag');
     row.dato = cell('Dato');
-    row.nyDato = cell('Ny dato');        // tom når kolonnen ikke finnes
-    row.label = (row.nyDato || row.dato) + ' ' + row.home + ' - ' + row.away + ' (' + row.serie + ')';
+    row.label = row.dato + ' ' + row.home + ' - ' + row.away + ' (' + row.serie + ')';
     row.key = matchKey_(row.serie, row.home, row.away);
 
     const f = byKey[row.key];
@@ -614,16 +737,14 @@ function buildPlan_(profile) {
   pending.forEach(function (row) {
     const f = row.fixture;
     if (!f) {
-      if (isoOf_(row.nyDato || row.dato) >= today) missingFromFeed.push({ row: row.rowNum, label: row.label });
+      if (isoOf_(row.dato) >= today) missingFromFeed.push({ row: row.rowNum, label: row.label });
       return;
     }
 
-    const agreed = row.nyDato !== '' && row.nyDato !== row.dato;
     const want = {
-      'Dato': f.dato, 'Tid': f.tid, 'Bane': f.bane,
+      'Dato': f.dato, 'Dag': f.dag, 'Tid': f.tid, 'Bane': f.bane,
       'Hjemmelag': f.homeLong, 'Bortelag': f.awayLong
     };
-    if (!agreed) { want['Ny dato'] = f.dato; want['Dag'] = f.dag; }
 
     if (norm_(row.home) !== norm_(f.homeLong)) nameChanges.push({ row: row.rowNum, from: row.home, to: f.homeLong });
     if (norm_(row.away) !== norm_(f.awayLong)) nameChanges.push({ row: row.rowNum, from: row.away, to: f.awayLong });
@@ -633,18 +754,12 @@ function buildPlan_(profile) {
       if (t.col[name] === undefined) return;
       const nxt = want[name];
       if (nxt === '' || nxt === null || nxt === undefined) return;
-      if (name === 'Ny dato' && t.formulas[row.idx] && t.formulas[row.idx][t.col[name]]) return;
+      // En formel er alltid noens bevisste valg — la den stå.
+      if (t.formulas[row.idx] && t.formulas[row.idx][t.col[name]]) return;
       const cur = fmtCell_(row.cells[t.col[name]], name);
       if (norm_(cur) !== norm_(nxt)) changes.push({ column: name, from: cur, to: nxt });
     });
     if (changes.length) updates.push({ row: row.rowNum, key: f.key, label: row.label, changes: changes });
-
-    if (agreed) {
-      const entry = { row: row.rowNum, key: f.key, label: row.label, avtalt: row.nyDato, fotballno: f.dato };
-      if (f.dato === row.nyDato) resolved.push(entry);
-      else if (f.dato !== row.dato) conflicts.push(entry);
-      else localMoves.push(entry);
-    }
   });
 
   fixtures.forEach(function (f) {
@@ -673,15 +788,14 @@ function buildPlan_(profile) {
     sheetName: t.sheet.getName(),
     notifyEmail: settings.notifyEmail,
     feedCount: fixtures.length,
-    teams: settings.teams,
+    teams: teamsResolved.length ? teamsResolved : settings.teams,
+    teamFilter: settings.teams,
+    teamsWithoutMatch: teamsWithoutMatch,
     sortAfterSync: settings.sortAfterSync,
     updates: updates,
     additions: additions,
     nameChanges: nameChanges,
     missingFromFeed: missingFromFeed,
-    localMoves: localMoves,
-    resolved: resolved,
-    conflicts: conflicts,
     suspect: suspect,
     existingRows: existingRows,
     matchedRows: matchedRows,
@@ -739,7 +853,7 @@ function applyPlan_(plan) {
       const row = new Array(width).fill('');
       const put = function (name, val) { if (t.col[name] !== undefined) row[t.col[name]] = val; };
       put('Kommentar', 'NY');
-      put('Dato', a.dato); put('Ny dato', a.dato); put('Dag', a.dag); put('Tid', a.tid);
+      put('Dato', a.dato); put('Dag', a.dag); put('Tid', a.tid);
       put('Hjemmelag', a.home); put('Bortelag', a.away);
       put('Bane', a.bane); put('Turnering', a.serie);
       return row;
@@ -749,10 +863,16 @@ function applyPlan_(plan) {
   }
 
   let sort = { sorted: false, reason: 'ikke bedt om' };
-  if (plan.sortAfterSync && (cellsWritten || rowsAdded)) {
+  let format = { formatted: 0, teams: 0 };
+  if (cellsWritten || rowsAdded) {
     // Ny tabellstruktur etter innsetting, så les den om igjen før sortering.
-    sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
-    if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
+    if (plan.sortAfterSync) {
+      sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
+      if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
+    }
+    // Formateres etter sortering — radene har flyttet på seg.
+    const prof = loadProfiles_().filter(function (p) { return norm_(p.sheetName) === norm_(plan.sheetName); })[0];
+    if (prof) format = applyRowFormats_(locateTable_({ sheetName: plan.sheetName }), prof);
   }
 
   return {
@@ -762,6 +882,7 @@ function applyPlan_(plan) {
     additionsHeld: additionsHeld,
     missingFromFeed: plan.missingFromFeed,
     sort: sort,
+    format: format,
     warnings: warnings
   };
 }
@@ -813,66 +934,77 @@ function sortByDato_(t) {
 
 // ------------------------------------------------------------- FRAMSTILLING -
 
+/**
+ * Rapporten. Én linje per rad som endrer seg.
+ *
+ * Lagnavn står ikke i sin egen bolk lenger — en rad der bare navnet er rettet
+ * ble to oppslag om samme sak. Når alle endringene på raden er navn, er
+ * "fra -> til" hele historien og kampen nevnes ikke, for da ville det nye
+ * navnet stått to ganger. Ellers navngis kampen, fordi et radnummer alene ikke
+ * sier hvilken kamp som har flyttet seg.
+ */
 function renderPlan_(plan) {
-  const L = ['TERMINLISTE: ' + plan.sheetName, ''];
+  const L = ['TERMINLISTE: ' + plan.sheetName +
+             ' (Lag: ' + (plan.teams || []).join(', ') + ')', ''];
+
+  if ((plan.teamsWithoutMatch || []).length) {
+    L.push('UTEN TREFF I KALENDEREN: ' + plan.teamsWithoutMatch.join(', '));
+    L.push('');
+  }
+
   if (plan.suspect) {
-    L.push('!! ADVARSEL');
-    L.push('   ' + plan.suspectReason);
+    L.push('!! ' + plan.suspectReason);
     L.push('   Nye rader holdes tilbake. Endringer på eksisterende rader skrives som vanlig.');
     L.push('');
   }
-  if (plan.conflicts.length) {
-    L.push('KOLLIDERER MED LOKAL AVTALE — må avklares');
-    plan.conflicts.forEach(function (c) {
-      L.push('  ' + c.label);
-      L.push('     dere har avtalt ' + c.avtalt + ', fotball.no har flyttet til ' + c.fotballno);
-    });
-    L.push('');
-  }
+
   if (plan.updates.length) {
     L.push('ENDRINGER (' + plan.updates.length + ')');
     plan.updates.forEach(function (u) {
-      L.push('  rad ' + u.row + '  ' + u.label);
-      u.changes.forEach(function (c) {
-        if (c.column === 'Hjemmelag' || c.column === 'Bortelag') return;  // vises samlet nedenfor
-        L.push('     ' + c.column + ': ' + c.from + '  ->  ' + c.to);
+      const bits = u.changes.map(function (c) { return c.from + ' -> ' + c.to; }).join(', ');
+      const onlyNames = u.changes.every(function (c) {
+        return c.column === 'Hjemmelag' || c.column === 'Bortelag';
       });
+      if (onlyNames) {
+        L.push('rad ' + u.row + ' ' + bits);
+      } else {
+        const home = pick_(u.changes, 'Hjemmelag') || pick0_(u.label, 0);
+        const away = pick_(u.changes, 'Bortelag') || pick0_(u.label, 1);
+        L.push('rad ' + u.row + ' ' + home + ' - ' + away + ': ' + bits);
+      }
     });
     L.push('');
   }
-  if (plan.nameChanges.length) {
-    L.push('LAGNAVN JUSTERT TIL FOTBALL.NO SIN SKRIVEMÅTE (' + plan.nameChanges.length + ')');
-    plan.nameChanges.slice(0, 8).forEach(function (n) {
-      L.push('  rad ' + n.row + '  ' + n.from + '  ->  ' + n.to);
-    });
-    if (plan.nameChanges.length > 8) L.push('  ... og ' + (plan.nameChanges.length - 8) + ' til');
-    L.push('');
-  }
+
   if (plan.additions.length) {
     L.push('NYE KAMPER (' + plan.additions.length + ')' + (plan.suspect ? ' — HOLDES TILBAKE' : ''));
-    plan.additions.forEach(function (a) { L.push('  ' + a.label); });
+    plan.additions.forEach(function (a) { L.push(a.label); });
     L.push('');
   }
-  if (plan.resolved.length) {
-    L.push('FOTBALL.NO HAR NÅ REGISTRERT AVTALEN');
-    plan.resolved.forEach(function (c) { L.push('  ' + c.label + ' -> ' + c.avtalt); });
-    L.push('');
-  }
-  if (plan.localMoves.length) {
-    L.push('LOKALE AVTALER SOM STÅR (' + plan.localMoves.length + ') — ikke rørt');
-    plan.localMoves.forEach(function (c) { L.push('  ' + c.label + '  (fotball.no: ' + c.fotballno + ')'); });
-    L.push('');
-  }
+
   if (plan.missingFromFeed.length) {
-    L.push('IKKE I KALENDEREN (' + plan.missingFromFeed.length + ') — normalt for ferdigspilte kamper,');
-    L.push('som faller ut av strømmen. Sjekk de som ligger fram i tid:');
-    plan.missingFromFeed.forEach(function (m) { L.push('  rad ' + m.row + '  ' + m.label); });
+    L.push('IKKE I KALENDEREN (' + plan.missingFromFeed.length + ') — sjekk de som ligger fram i tid');
+    plan.missingFromFeed.forEach(function (m) { L.push('rad ' + m.row + ' ' + m.label); });
     L.push('');
   }
-  if (L.length === 2) L.push('Ingen endringer. Arket er i takt med fotball.no (' + plan.feedCount + ' kamper).');
-  L.push('');
-  L.push('Lag som følges (arket "' + CONFIG.CONFIG_SHEET + '"): ' + (plan.teams || []).join(', '));
-  return L.join('\n');
+
+  if (!plan.updates.length && !plan.additions.length && !plan.missingFromFeed.length && !plan.suspect) {
+    L.push('Ingen endringer. I takt med fotball.no (' + plan.feedCount + ' kamper).');
+  }
+  return L.join('\n').replace(/\n+$/, '');
+}
+
+/** Den nye verdien for en kolonne, hvis den er blant endringene. */
+function pick_(changes, column) {
+  const hit = changes.find(function (c) { return c.column === column; });
+  return hit ? hit.to : null;
+}
+
+/** Lagnavnene slik de står i etiketten "dd.MM.yyyy Hjemme - Borte (Serie)". */
+function pick0_(label, which) {
+  const m = String(label).match(/^\S+\s+(.*?)\s+\((?:[^()]*)\)\s*$/);
+  const teams = m ? m[1].split(' - ') : [];
+  return (teams[which] || '').trim();
 }
 
 // ------------------------------------------------------- NAVNENORMALISERING -

@@ -27,9 +27,8 @@ has to be done once. Everything after that is automatic.
 `setup()` installs the nightly trigger and is safe to re-run — it will not
 create duplicate triggers or a second token.
 
-If the sheet still has the old `Varsling` or `KampID` columns, run
-`ryddKolonner()` once from the same dropdown to remove them. It only deletes
-columns with exactly those headers, and logs what it did.
+Old `Ny dato`, `Varsling` or `KampID` columns can simply be deleted by hand —
+the script ignores them either way.
 
 ## 3. Deploy as a web app
 
@@ -75,7 +74,9 @@ every time, so a fresh sheet and a long-running one behave identically.
 
 Expect the first `preview` to propose a team-name change on nearly every row:
 names are written in fotball.no's full spelling, and a sheet kept in short names
-will differ everywhere. It settles after one sync.
+will differ everywhere. It settles after one sync — and row formatting keys off
+those names, so colours only take effect from the second sync on a sheet that
+started with short names.
 
 ## The web app is optional
 

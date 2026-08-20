@@ -7,6 +7,7 @@ Bruk:
     python3 lfk.py read
     python3 lfk.py feed
     python3 lfk.py config
+    python3 lfk.py format
     python3 lfk.py preview
     python3 lfk.py apply
     python3 lfk.py apply --exclude "<kampnokkel>"   # alt unntatt én omstridt kamp
@@ -36,7 +37,7 @@ import sys
 import urllib.error
 import urllib.request
 
-ACTIONS = ["ping", "read", "feed", "config", "preview", "apply"]
+ACTIONS = ["ping", "read", "feed", "config", "preview", "apply", "format"]
 MAX_REDIRECTS = 5
 
 

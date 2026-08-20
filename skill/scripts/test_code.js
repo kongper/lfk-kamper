@@ -54,7 +54,7 @@ Påfølgende dager||30.10.2026|30.10.2026|fredag|19:30|Otta|Lillehammer|Øya sta
 // The sheet as it now stands: Varsling and KampID removed. RAW still carries
 // them so the harness also proves those columns are simply ignored if present.
 const RAW_HEADER = ['Kommentar', 'Varsling', 'Dato', 'Ny dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering', 'KampID'];
-const DROP = ['Varsling', 'KampID'];
+const DROP = ['Varsling', 'KampID', 'Ny dato'];
 const HEADER = RAW_HEADER.filter(h => !DROP.includes(h));
 const C = {}; HEADER.forEach((h, i) => C[h] = i);
 const keepIdx = RAW_HEADER.map((h, i) => DROP.includes(h) ? -1 : i).filter(i => i >= 0);
@@ -85,7 +85,7 @@ function makeFeed() {
   sheetRows.forEach((r, i) => {
     if (i < 2) return;                                  // played, aged out of the feed
     const serie = r[C['Turnering']];
-    let d = r[C['Ny dato']], t = r[C['Tid']], dg = r[C['Dag']];
+    let d = r[C['Dato']], t = r[C['Tid']], dg = r[C['Dag']];
     if (r[C['Hjemmelag']] === 'Ottestad' && serie === 'G16 Elite Høst') { d = '03.09.2026'; dg = 'torsdag'; }
     if (r[C['Hjemmelag']] === 'Lørenskog') { d = '19.09.2026'; t = '18:00'; dg = 'lørdag'; }
     out.push({
@@ -133,6 +133,10 @@ let CONFIG_ROWS = [
   ['Varsle e-post', 'din@epost.no'],
   ['Sorter etter dato', 'ja']
 ];
+const setFormatMode = m => {
+  CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Formater rader');
+  if (m) CONFIG_ROWS.push(['Formater rader', m]);
+};
 
 // ---- Apps Script stubs -----------------------------------------------------
 const written = [];
@@ -165,7 +169,23 @@ const sandbox = {
       getNumSheets: () => 2,
       insertSheet: () => { throw new Error('config sheet already exists in this harness'); },
       getSheetByName: (n) => n === 'config'
-        ? { getName: () => 'config', getDataRange: () => ({ getValues: () => CONFIG_ROWS }) }
+        ? { getName: () => 'config',
+            getDataRange: () => ({ getValues: () => CONFIG_ROWS }),
+            getRange: (r, c) => {
+              const f = CELL_FMT[r + ',' + c] || {};
+              return {
+                getBackground: () => f.bg || '#ffffff',
+                getFontColor:  () => f.fg || '#000000',
+                getFontWeight: () => f.weight || 'normal',
+                getFontStyle:  () => f.style || 'normal',
+                getFontLine:   () => f.line || 'none',
+                getFontFamily: () => f.family || 'Arial',
+                getFontSize:   () => f.size || 10,
+                getHorizontalAlignment: () => f.align || 'left',
+                copyFormatToRange: (sh, c1, c2, r1, r2) =>
+                  COPIES.push({ c1: c1, c2: c2, r1: r1, r2: r2 })
+              };
+            } }
         : n === 'Kamper' ? MAIN
         : (sandbox.WITH_DECOY && n === 'Notater') ? DECOY
         : null,
@@ -179,7 +199,7 @@ const MAIN = {
         getDataRange: () => ({
           getValues: () => sheetValues,
           getFormulas: () => sheetValues.map((row, ri) => row.map((_, ci) =>
-            (sandbox.FORMULAS_ON && ri > 0 && ci === C['Ny dato']) ? '=B' + (ri + 1) : ''))
+            (sandbox.FORMULAS_ON && ri > 0 && ci === C['Tid']) ? '=X' + (ri + 1) : ''))
         }),
         getLastColumn: () => HEADER.length,
         getLastRow: () => sheetValues.length,
@@ -189,10 +209,30 @@ const MAIN = {
           getValues: () => sheetValues.slice(r - 1, r - 1 + (nr || 1)).map(row => row.slice(c - 1, c - 1 + (nc || 1))),
           getFormulas: () => Array.from({ length: nr || 1 }, () =>
             Array.from({ length: nc || 1 }, (_, ci) =>
-              (sandbox.FORMULAS_ON && (c - 1 + ci) === C['Ny dato']) ? '=B2' : '')),
-          sort: (spec) => { sandbox.SORTED = spec; }
+              (sandbox.FORMULAS_ON && (c - 1 + ci) === C['Tid']) ? '=X2' : '')),
+          sort: (spec) => { sandbox.SORTED = spec; },
+          getBackgrounds: () => grid(nr, nc, '#ffffff'),
+          getFontColors:  () => grid(nr, nc, '#000000'),
+          getFontWeights: () => grid(nr, nc, 'normal'),
+          getFontStyles:  () => grid(nr, nc, 'normal'),
+          getFontLines:   () => grid(nr, nc, 'none'),
+          getFontFamilies: () => grid(nr, nc, 'Arial'),
+          getFontSizes:   () => grid(nr, nc, 10),
+          getHorizontalAlignments: () => grid(nr, nc, 'left'),
+          getNumberFormats: () => grid(nr, nc, 'dd.MM.yyyy'),
+          setNumberFormats: v => { FMT.numberFormats = { col: c, width: nc, value: v }; },
+          setBackgrounds: v => { FMT.restored = (FMT.restored || 0) + 1; FMT.lastRestoreCol = c; (FMT.restoreCols = FMT.restoreCols || []).push(c); },
+          setFontColors:  () => {}, setFontWeights: () => {}, setFontStyles: () => {},
+          setFontLines:   () => {}, setFontFamilies: () => {}, setFontSizes: () => {},
+          setHorizontalAlignments: () => {}
         })
 };
+
+const grid = (r, c, v) => Array.from({ length: r || 1 }, () => Array.from({ length: c || 1 }, () => v));
+const FMT = {};
+// Format on the config sheet's Lag cells, keyed "row,col" (1-based).
+let CELL_FMT = {};
+let COPIES = [];
 
 // A tab sitting in front of the fixture sheet with no Turnering header —
 // notes, a chart, anything. It must not be mistaken for the fixture table.
@@ -243,25 +283,23 @@ check('not flagged as suspect', plan.suspect, false);
 check('played rows absent from the feed are not reported', plan.missingFromFeed.length, 0);
 
 console.log('\n--- buildPlan_: the two real deltas ---');
-check('Ottestad (local agreement) gets no date/day/time write',
-  (plan.updates.find(u => /Ottestad - Lillehammer 2/.test(u.label)) || { changes: [] })
-    .changes.filter(c => ['Dato', 'Ny dato', 'Dag'].includes(c.column)).length, 0);
-check('  ... and is reported as a standing local agreement',
-  plan.localMoves.map(m => [m.avtalt, m.fotballno]), [['16.10.2026', '03.09.2026']]);
-check('  ... with no false conflict or resolution', [plan.conflicts.length, plan.resolved.length], [0, 0]);
+check('Ottestad needs no date write — sheet and feed already agree',
+  (plan.updates.find(u => /Ottestad G16-1/.test(u.label)) || { changes: [] })
+    .changes.filter(c => c.column === 'Dato').length, 0);
 const lor = plan.updates.find(u => /Lørenskog/.test(u.label));
-check('Lørenskog: Dato, mirrored Ny dato, Dag and Tid all move',
+check('Lørenskog: Dato, Dag and Tid all move',
   lor.changes.map(c => c.column).filter(c => c !== 'Hjemmelag' && c !== 'Bortelag').sort(),
-  ['Dag', 'Dato', 'Ny dato', 'Tid']);
+  ['Dag', 'Dato', 'Tid']);
 check('Lørenskog: Dato takes the feed value',
   lor.changes.find(c => c.column === 'Dato'), { column: 'Dato', from: '20.09.2026', to: '19.09.2026' });
 
 console.log('\n--- formula protection ---');
 sandbox.FORMULAS_ON = true;
 const lorF = sandbox.buildPlans_()[0].updates.find(u => /Lørenskog/.test(u.label));
-check('a formula in Ny dato is left alone',
+// The formula sits in Tid here — protection is now per cell, not per column.
+check('a cell holding a formula is left alone, whatever the column',
   lorF.changes.map(c => c.column).filter(c => c !== 'Hjemmelag' && c !== 'Bortelag').sort(),
-  ['Dag', 'Dato', 'Tid']);
+  ['Dag', 'Dato']);
 sandbox.FORMULAS_ON = false;
 
 console.log('\n--- team names follow fotball.no verbatim ---');
@@ -287,31 +325,26 @@ check('and proposes no further name churn', plan2.nameChanges.length, 0);
 sheetValues.splice(0, sheetValues.length, ...original);
 
 console.log('\n--- optional columns ---');
-// Drop "Ny dato" entirely: a sheet that never uses local agreements.
+// Drop "Dag": a sheet that does not care which weekday it is.
 const FULL_HEADER = HEADER.slice(), FULL_ROWS = sheetValues.slice(1).map(r => r.slice());
-const nyIdx = C['Ny dato'];
-HEADER.splice(nyIdx, 1);
+const dagIdx = C['Dag'];
+HEADER.splice(dagIdx, 1);
 Object.keys(C).forEach(k => delete C[k]);
-HEADER.forEach((h, i) => C[h] = i);
+HEADER.forEach((h, i2) => C[h] = i2);
 sheetValues.splice(0, sheetValues.length,
-  HEADER, ...FULL_ROWS.map(r => r.filter((_, i) => i !== nyIdx)));
+  HEADER, ...FULL_ROWS.map(r => r.filter((_, i2) => i2 !== dagIdx)));
 
-const planNoNy = sandbox.buildPlans_('Kamper')[0];
-check('a sheet without "Ny dato" still builds a plan', typeof planNoNy.updates, 'object');
+const planNoDag = sandbox.buildPlans_('Kamper')[0];
+check('a sheet without "Dag" still builds a plan', typeof planNoDag.updates, 'object');
 check('nothing is written to the missing column',
-  planNoNy.updates.every(u => u.changes.every(c => c.column !== 'Ny dato')), true);
-check('no row is read as the literal string "undefined"',
-  planNoNy.updates.every(u => u.changes.every(c => c.from !== 'undefined')), true);
-check('local agreements are impossible without the column', planNoNy.localMoves.length, 0);
-check('the Ottestad row becomes an ordinary row and follows fotball.no',
-  (planNoNy.updates.find(u => /Ottestad G16-1/.test(u.label)) || { changes: [] })
-    .changes.filter(c => c.column === 'Dato').length, 0);
-check('Lørenskog still syncs',
-  (planNoNy.updates.find(u => /Lørenskog/.test(u.label)) || { changes: [] })
+  planNoDag.updates.every(u => u.changes.every(c => c.column !== 'Dag')), true);
+check('no cell is read as the literal string "undefined"',
+  planNoDag.updates.every(u => u.changes.every(c => c.from !== 'undefined')), true);
+check('rows still match, so nothing is duplicated', planNoDag.additions.length, 0);
+check('Lørenskog still syncs its date',
+  (planNoDag.updates.find(u => /Lørenskog/.test(u.label)) || { changes: [] })
     .changes.some(c => c.column === 'Dato' && c.to === '19.09.2026'), true);
-check('and rows are still matched, not duplicated', planNoNy.additions.length, 0);
 
-// A column the matching genuinely needs is still an error, and names them all.
 const noTurnering = HEADER.filter(h => h !== 'Turnering');
 sheetValues.splice(0, 1, noTurnering);
 check('missing required columns fail with a list', (() => {
@@ -320,7 +353,7 @@ check('missing required columns fail with a list', (() => {
 })(), true);
 
 Object.keys(C).forEach(k => delete C[k]);
-FULL_HEADER.forEach((h, i) => C[h] = i);
+FULL_HEADER.forEach((h, i2) => C[h] = i2);
 HEADER.splice(0, HEADER.length, ...FULL_HEADER);
 sheetValues.splice(0, sheetValues.length, FULL_HEADER, ...FULL_ROWS);
 
@@ -356,6 +389,23 @@ check('  ... but it can be overridden deliberately', (() => {
   return sandbox.applyPlan_(planBad).rowsAdded > 0;
 })(), true);
 sandbox.FEED = makeFeed();
+
+console.log('\n--- the header names the teams that were actually matched ---');
+CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat([
+  ['Lag', 'Lillehammer G15'],        // a prefix covering two real teams
+  ['Lag', 'Lillehammer J17']         // a team with no fixtures at all
+]);
+const planPfx = sandbox.buildPlans_('Kamper')[0];
+check('the prefix is expanded to the teams it hit',
+  planPfx.teams, ['Lillehammer G15-1', 'Lillehammer G15-2']);
+check('the raw filter is still available', planPfx.teamFilter.length, 2);
+check('and a prefix that hit nothing is reported',
+  planPfx.teamsWithoutMatch, ['Lillehammer J17']);
+check('the header shows the resolved names',
+  sandbox.renderPlan_(planPfx).split('\n')[0].indexOf('Lag: Lillehammer G15-1, Lillehammer G15-2') > 0, true);
+CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat([
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2']]);
 
 console.log('\n--- team filter from the config sheet ---');
 sandbox.FEED = makeFeed().concat([G16_3]);
@@ -446,6 +496,98 @@ check('  ... and writes nothing', appended.length, 0);
 check('  ... and explains why', /formler/.test(sortF.reason), true);
 sandbox.FORMULAS_ON = false;
 sheetValues.splice(1, sheetValues.length - 1, ...inOrder);
+
+console.log('\n--- row formatting inherited from the Lag cell ---');
+const lagRow = CONFIG_ROWS.findIndex(r => r[1] === 'Lillehammer G15-2') + 1;
+
+// After a sync the sheet carries fotball.no's verbatim names, and that is what
+// the Lag prefix is matched against. Put the harness in that state first.
+const SHORT_ROWS = sheetValues.slice(1).map(r => r.slice());
+sheetValues.slice(1).forEach(r => {
+  const serie = r[C['Turnering']];
+  if (!serie) return;
+  r[C['Hjemmelag']] = longOf(r[C['Hjemmelag']], serie);
+  r[C['Bortelag']] = longOf(r[C['Bortelag']], serie);
+});
+
+CELL_FMT = {}; COPIES = []; Object.keys(FMT).forEach(k => delete FMT[k]);
+
+// Default is "alle": every Lag cell drives its rows, formatted-looking or not.
+// This is the only mode where a border-only cell works, because borders cannot
+// be read back and such a cell is indistinguishable from an empty one.
+setFormatMode(null);
+const resAll = sandbox.applyRowFormats_(sandbox.locateTable_({ sheetName: 'Kamper' }), sandbox.loadProfiles_()[0]);
+check('default mode is "alle"', resAll.mode, 'alle');
+check('  ... so a plain Lag cell still drives its rows', resAll.teams, 4);
+check('  ... and every matched row is copied to', COPIES.length > 30, true);
+
+setFormatMode('markerte');
+COPIES = [];
+check('mode "markerte" skips unmarked cells',
+  sandbox.applyRowFormats_(sandbox.locateTable_({ sheetName: 'Kamper' }), sandbox.loadProfiles_()[0]),
+  { formatted: 0, teams: 0, mode: 'markerte' });
+check('  ... and copies nothing', COPIES.length, 0);
+
+setFormatMode('nei');
+COPIES = [];
+check('mode "nei" turns formatting off entirely',
+  sandbox.applyRowFormats_(sandbox.locateTable_({ sheetName: 'Kamper' }), sandbox.loadProfiles_()[0]).teams, 0);
+check('  ... and copies nothing', COPIES.length, 0);
+setFormatMode('markerte');
+
+// Under "markerte", a cell with a visible marking is picked up.
+CELL_FMT[lagRow + ',2'] = { bg: '#00008b', fg: '#ffffff', line: 'underline' };
+COPIES = []; delete FMT.restoreCols;
+const res = sandbox.applyRowFormats_(sandbox.locateTable_({ sheetName: 'Kamper' }), sandbox.loadProfiles_()[0]);
+check('only the one formatted team is applied', res.teams, 1);
+check('and it hits every row that team plays in', res.formatted, 10);
+check('one whole-format copy per matched row', COPIES.length, 10);
+check('the copy spans the full row, so the border wraps it',
+  COPIES.every(c => c.c1 === 1 && c.c2 === HEADER.length && c.r1 === c.r2), true);
+
+const matchedRows = sheetValues.slice(1)
+  .map((r, i2) => (r[C['Hjemmelag']] === 'Lillehammer G15-2' || r[C['Bortelag']] === 'Lillehammer G15-2') ? i2 + 2 : null)
+  .filter(Boolean);
+check('and only those rows', COPIES.map(c => c.r1).sort((a, b) => a - b), matchedRows);
+check('number formats are put back, so dates keep displaying as dates',
+  FMT.numberFormats && FMT.numberFormats.width, HEADER.length);
+check('the date and Kommentar columns get their own look restored afterwards',
+  (FMT.restoreCols || []).slice().sort((a, b) => a - b),
+  [C['Kommentar'] + 1, C['Dato'] + 1].sort((a, b) => a - b));
+
+CELL_FMT = {}; COPIES = []; setFormatMode(null);
+sheetValues.splice(1, sheetValues.length - 1, ...SHORT_ROWS);
+
+console.log('\n--- the report ---');
+const rp = sandbox.renderPlan_({
+  sheetName: 'G15 - G16',
+  teams: ['Lillehammer G15-1', 'Lillehammer G15-2'],
+  feedCount: 39, suspect: false, additions: [], missingFromFeed: [],
+  updates: [
+    { row: 16, label: '07.09.2026 Lillehammer G15-2 - Gjøvik-Lyn G15- (G15 2. div avd 02 Høst)',
+      changes: [{ column: 'Bortelag', from: 'Gjøvik-Lyn G15-', to: 'Gjøvik-Lyn G15-1' }] },
+    { row: 24, label: '20.09.2026 Lørenskog G16-1 - Lillehammer G16-1 (G16 Interkrets)',
+      changes: [{ column: 'Dato', from: '20.09.2026', to: '19.09.2026' },
+                { column: 'Tid', from: '14:45', to: '18:00' }] }
+  ]
+}).split('\n');
+check('the teams sit on the header line, not in a trailing block',
+  rp[0], 'TERMINLISTE: G15 - G16 (Lag: Lillehammer G15-1, Lillehammer G15-2)');
+check('a prefix that matched nothing is called out', sandbox.renderPlan_({
+  sheetName: 'J17 - damer', teams: ['Lillehammer Kvinner 1', 'Lillehammer Kvinner 2'],
+  teamsWithoutMatch: ['Lillehammer J17'], feedCount: 17, suspect: false,
+  updates: [], additions: [], missingFromFeed: []
+}).split('\n')[2], 'UTEN TREFF I KALENDEREN: Lillehammer J17');
+check('a name-only change is one bare line, no match repeated',
+  rp[3], 'rad 16 Gjøvik-Lyn G15- -> Gjøvik-Lyn G15-1');
+check('a date/time change keeps the match, so the row means something',
+  rp[4], 'rad 24 Lørenskog G16-1 - Lillehammer G16-1: 20.09.2026 -> 19.09.2026, 14:45 -> 18:00');
+check('no separate LAGNAVN section any more', /LAGNAVN/.test(rp.join('\n')), false);
+check('and no trailing "Lag som følges" block', /Lag som følges/.test(rp.join('\n')), false);
+check('nothing to report is a single line',
+  sandbox.renderPlan_({ sheetName: 'X', teams: ['A'], feedCount: 39, suspect: false,
+    updates: [], additions: [], missingFromFeed: [] }).split('\n')[2],
+  'Ingen endringer. I takt med fotball.no (39 kamper).');
 
 console.log('\n--- filterPlan_ (selective apply) ---');
 const mk = () => ({ updates: [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }], additions: [{ key: 'c', label: 'C' }] });

@@ -1,6 +1,6 @@
 ---
 name: lfk-kamper
-description: Sync the "LFK kamper" Google Sheet with Lillehammer FK's official fixture list from fotball.no, protecting the locally agreed dates in the Ny dato column, and report what moved. Use this whenever the user mentions the LFK kamper sheet (also called G2011), terminlisten, kampoppsettet, fixtures, kamper, or asks whether any matches have been rescheduled, moved, or added — and also when they ask about collisions (kollisjon), back-to-back match days (påfølgende dager), or which matches are coming up for Lillehammer G15/G16. Trigger on phrases like "sync the sheet", "sjekk terminlisten", "har noen kamper blitt flyttet", "oppdater kampene", "what's changed in the schedule", even when fotball.no is not named explicitly.
+description: Sync the "LFK kamper" Google Sheet with Lillehammer FK's official fixture list from fotball.no, keeping team rows formatted, and report what moved. Use this whenever the user mentions the LFK kamper sheet (also called G2011), terminlisten, kampoppsettet, fixtures, kamper, or asks whether any matches have been rescheduled, moved, or added — and also when they ask about collisions (kollisjon), back-to-back match days (påfølgende dager), or which matches are coming up for Lillehammer G15/G16. Trigger on phrases like "sync the sheet", "sjekk terminlisten", "har noen kamper blitt flyttet", "oppdater kampene", "what's changed in the schedule", even when fotball.no is not named explicitly.
 ---
 
 # LFK kamper — fixture sync
@@ -83,12 +83,40 @@ time; a write they did not ask for is a broken trust.
 If `preview` comes back with nothing in `updates` or `additions`, say so in one
 line. Do not manufacture a report out of an empty diff.
 
-### What a change looks like
+### What the report looks like
+
+One line per changed row. A row whose only change is a team name is printed
+bare, because the `from -> to` is the whole story and naming the match would
+repeat the new name. Anything else names the match, since a row number alone
+does not say which fixture moved.
+
+```
+TERMINLISTE: J17 - damer (Lag: Lillehammer Kvinner 1, Lillehammer Kvinner 2)
+
+UTEN TREFF I KALENDEREN: Lillehammer J17
+
+ENDRINGER (2)
+rad 16 Gjøvik-Lyn G15- -> Gjøvik-Lyn G15-1
+rad 24 Lørenskog G16-1 - Lillehammer G16-1: 20.09.2026 -> 19.09.2026, 14:45 -> 18:00
+```
+
+The header lists the teams the prefixes actually **matched**, not the prefixes
+themselves — `Lillehammer Kv` is not something the user can act on. `plan.teams`
+holds the resolved names, `plan.teamFilter` the raw config values.
+
+`UTEN TREFF I KALENDEREN` names any configured prefix that matched no fixture.
+That is usually a team with no matches left this season, or one renamed after an
+age-group change. Mention it once; it is informative, not an error.
+
+When relaying this to the user, keep that density — do not expand it back into
+a section per change type. Add interpretation only where it earns its place:
+a clash created by a move, or a fixture that has vanished from the feed.
+
+### The raw shape of a change
 
 ```json
-{"row": 24, "label": "20.09.2026 Lørenskog - Lillehammer (G16 Interkrets)",
+{"row": 24, "label": "20.09.2026 Lørenskog G16-1 - Lillehammer G16-1 (G16 Interkrets)",
  "changes": [{"column": "Dato", "from": "20.09.2026", "to": "19.09.2026"},
-             {"column": "Ny dato", "from": "20.09.2026", "to": "19.09.2026"},
              {"column": "Dag", "from": "søndag", "to": "lørdag"},
              {"column": "Tid", "from": "14:45", "to": "18:00"}]}
 ```
@@ -98,122 +126,49 @@ Rendered for the user, that is roughly:
 > **Lørenskog – Lillehammer** (G16 Interkrets) er flyttet fra søndag
 > 20. september kl. 14:45 til lørdag 19. september kl. 18:00.
 
-Note that `Ny dato` moved here only because it was mirroring `Dato`. Do not
-present that as two separate changes — it is one reschedule.
-
 Group several changes by date. Name the teams and the series every time — the
 user is tracking two teams across four series and a bare row number tells them
 nothing.
 
 ## Reading the sheet's own logic
 
-The two date columns divide the work between fotball.no and the coaches:
-
-- **`Dato` is what fotball.no says.** The sync always writes it.
-- **`Ny dato` is what the coaches have agreed**, which is often not registered
-  in FIKS yet. This is the human's column.
-
-A row where the two differ has a local agreement on it, and that agreement is
-the whole point of the column — the sync must not be able to tear it away. So:
-
-Only `Dato`, `Hjemmelag`, `Bortelag` and `Turnering` have to exist. Every other
-column is optional — including `Ny dato`. A sheet without it has no local
-agreements at all, so `localMoves`, `resolved` and `conflicts` stay empty and
-everything follows fotball.no. Do not tell the user a column is missing unless
-it is one of the four required ones; absence is a valid choice.
+Required: `Dato`, `Hjemmelag`, `Bortelag`, `Turnering`. Optional: `Dag`, `Tid`,
+`Bane`, `Kommentar`. A column that is not there is neither read nor written, so
+absence is a valid choice — do not report it as a problem.
 
 | Column | Written when |
 |---|---|
-| `Dato` | always, from the feed |
-| `Ny dato` | only when it currently mirrors `Dato` — i.e. there is no agreement there to destroy |
-| `Dag` | only on rows with no local agreement (it describes the date actually being played, so on moved rows it belongs to `Ny dato`) |
-| `Tid`, `Bane` | always — kickoff and pitch are practical facts, not part of the agreement |
-| `Hjemmelag`, `Bortelag` | always, in fotball.no's own spelling, verbatim (`Nordre Land IL/Torpa IL G15-2`) |
-| `Kommentar` | never, except `NY` on rows the sync appends |
+| `Dato`, `Dag`, `Tid`, `Bane` | always, from the feed |
+| `Hjemmelag`, `Bortelag` | always, in fotball.no's verbatim spelling |
+| `Kommentar` | never |
 
-A formula in `Ny dato` is also left alone, so a sheet that computes that column
-keeps computing it.
+`Kommentar` is the user's column and the sync never touches it. Agreed
+reschedules live there now as free text, so **do not try to parse it, act on it,
+or reconcile it against the feed**. If a comment says a match was moved and
+fotball.no disagrees, mention it and let the user decide.
 
-`Kommentar` is the user's column. The script never writes to it except to stamp
-`NY` on rows it appends. The values there are the coaches' own shorthand:
+A cell containing a formula is never overwritten, whatever column it is in.
 
-| | |
-|---|---|
-| `Kollisjon` | Both teams playing at the same time — a squad-splitting problem |
-| `Påfølgende dager` | Matches on consecutive days, a load concern |
-| `IF` | Innstilt/flyttet — this fixture has been rescheduled |
-| `Stjerne-cup` | Clashes with a cup weekend |
+### Row formatting
 
-These are judgements about *this squad*, not facts from fotball.no. Never
-overwrite one, never invent one, and do not "correct" a flag because the
-underlying date changed. If a sync makes a flag obsolete or creates a new
-conflict, **say so and let the user decide** — see below.
+Formatting a `Lag` cell in `config` makes every fixture row for that team look
+like that cell — colours, font, alignment and borders, with the border wrapping
+the whole row. The date columns and `Kommentar` keep their own colours and
+number format but do take the border; they belong to the user, not the team.
 
-### Flagging consequences
+`Formater rader` in `config` sets the scope: `alle` (default — every `Lag` cell
+drives its rows), `markerte` (only cells with a visible marking), or `nei`.
 
-A reschedule often creates a new problem. After showing the diff, check the
-resulting schedule and mention it if you see:
+The reason `alle` is the default is that **Apps Script cannot read borders**. A
+cell carrying only a border is indistinguishable from an empty one, so under
+`markerte` such a team would silently never format. Under `alle` it works,
+at the cost of `config` owning row appearance outright — anything styled
+directly on a row is overwritten next sync. If a user wants to hand-colour
+individual rows, `markerte` is the mode for them.
 
-- Two fixtures on the same date and time involving `Lillehammer` and
-  `Lillehammer 2` — a new `Kollisjon`.
-- Fixtures on consecutive calendar days — a new `Påfølgende dager`.
-- A row whose `Kommentar` flag no longer applies because the clash it described
-  has been resolved by the move.
-
-Offer to update the `Kommentar` cells; do not do it unprompted. This is the
-most useful thing the skill does beyond mechanical syncing, because it is the
-work the user was doing by hand.
-
-## Configuration lives in the sheet
-
-The `config` tab holds **one column per fixture sheet**, and the column header
-is the name of the tab it drives. One spreadsheet can therefore carry several
-squads, each with its own teams, recipient and sort setting.
-
-| Nøkkel | kampoppsett_2026 | J13 2026 |
-|---|---|---|
-| Klubb-ID | 1683 | 1683 |
-| Lag | Lillehammer G15-1 | Lillehammer J13-1 |
-| Lag | Lillehammer G15-2 | |
-| Lag | Lillehammer G16-1 | |
-| Lag | Lillehammer G16-2 | |
-| Varsle e-post | din@epost.no | annen@epost.no |
-| Sorter etter dato | ja | ja |
-
-A key may repeat down the rows — that is how `Lag` becomes a list — and blank
-cells just mean that column does not use that row, so columns need not be the
-same length.
-
-Every command works across all sheets. `preview` returns `plans`, one per
-column; `apply` returns `results`. Pass `--sheet "<name>"` to work on one.
-Report each sheet under its own heading — the user is looking at several
-squads, and an undifferentiated list of changes is unreadable.
-
-**`Lag` is a prefix, and the scope is deliberately narrow.** The club also has a
-`Lillehammer G16-3`, playing a series this sheet does not track, so a prefix of
-`Lillehammer G16` would quietly pull in nine fixtures the user does not want.
-The four exact names are the safe setting. If the user asks why some fixture is
-missing, check this list before suspecting the sync.
-
-Selecting by *team* rather than by series is what makes new fixtures appear
-automatically: a team keeps its name all season, while series names change every
-time the squad moves up an age group. A cup match or a new series for one of
-these four teams now arrives on its own.
-
-`setup()` creates the tab with defaults if it is absent, placed last so it never
-displaces the fixture sheet. `config` shows what the script actually loaded.
-
-## Sorting
-
-With `Sorter etter dato = ja`, the fixture table is re-sorted ascending by
-`Dato` after any write. Two paths, and the difference matters: if the `Dato`
-cells are real dates, the sheet sorts itself and formulas and formatting travel
-with the rows. If they are text, the script parses and reorders them, because an
-alphabetical sort would put `13.10` before `03.09`.
-
-The text path moves values, not formulas — so if there are formulas anywhere in
-the table it refuses to sort and says so rather than flattening them. If the
-user wants both sorting and formulas, the fix is to make `Dato` hold real dates.
+It runs automatically after any sync that wrote something, and on demand via the
+`format` action or the sheet menu. Matching uses the team name as written in the
+sheet, which after a sync is fotball.no's spelling.
 
 ## How rows are matched, and the guard around it
 
@@ -246,37 +201,6 @@ is the `Lag` list in `config` having gone stale after an age-group change.
 Diagnose it before reaching for `--force`, and never use `--force` without
 saying plainly what it will insert.
 
-## Rows carrying a local agreement
-
-`preview` sorts rows with a live `Ny dato` into three buckets. None of them
-cause a bad write — that part is handled — but they are the part of a sync the
-user actually cares about, so report them.
-
-- **`localMoves`** — the agreement stands, fotball.no has not moved. Routine.
-  A line, no more.
-- **`resolved`** — fotball.no has now registered the agreed date, so `Dato` and
-  `Ny dato` have converged. Say it plainly: the move is official, the row no
-  longer needs watching.
-- **`conflicts`** — fotball.no has moved the fixture to a *third* date, neither
-  the old one nor the agreed one. **Lead with these.** Someone has rescheduled
-  around an agreement the district does not know about, and only the user can
-  untangle it.
-
-> **Ottestad – Lillehammer 2** (G16 Elite Høst): dere har avtalt 16.10, men
-> fotball.no har nå flyttet kampen til 22.10. Avtalen står urørt i arket —
-> hvilken dato gjelder?
-
-**Do not let one contested row hold up the rest.** A sync often mixes one
-questionable change in with several obvious ones, and the obvious ones are
-worth having now. Apply the uncontested part and carry the question:
-
-```bash
-python3 scripts/lfk.py apply --exclude "<key from the preview>"
-```
-
-Each update and addition carries the `key` you pass here. Tell the user plainly
-what you wrote and what you held back, so nothing is left silently pending.
-
 ## Things that will bite
 
 **Rows are never deleted.** A fixture that vanishes from the feed shows up in
@@ -307,9 +231,10 @@ on nearly every row. That is expected and is not a matching failure — summaris
 it as one line ("lagnavn justert til fotball.no sin skrivemåte") rather than
 listing every row. `preview` caps the listing at eight for the same reason.
 
-**`Varsling` and `KampID` are gone.** The script neither reads nor writes them.
-`ryddKolonner()`, run from the Apps Script editor, deletes them if they are
-still present; it is deliberately not on the menu because it destroys data.
+**`Ny dato`, `Varsling` and `KampID` no longer exist.** Earlier versions had
+them; the script neither reads nor writes any of them now. If a sheet still has
+one, it simply sits there untouched. Agreed reschedules are free text in
+`Kommentar`.
 
 ## Output language
 

@@ -19,20 +19,40 @@ Only four columns are required — `Dato`, `Hjemmelag`, `Bortelag`, `Turnering`.
 The last three identify the row; `Dato` anchors it in time. Everything else is
 optional, and a column that isn't there is neither read nor written.
 
-| Column | Required | Owner | Written by the sync |
-|---|---|---|---|
-| `Dato` | yes | fotball.no | always |
-| `Hjemmelag`, `Bortelag`, `Turnering` | yes | fotball.no | always |
-| `Ny dato` | no | the coaches | only when it is mirroring `Dato` |
-| `Dag` | no | follows the date actually played | only when no local agreement exists |
-| `Tid`, `Bane` | no | fotball.no | always |
-| `Kommentar` | no | the coaches | never |
+| Column | Required | Written by the sync |
+|---|---|---|
+| `Dato`, `Hjemmelag`, `Bortelag`, `Turnering` | yes | always, from fotball.no |
+| `Dag`, `Tid`, `Bane` | no | always, from fotball.no |
+| `Kommentar` | no | never — yours, for agreed moves and anything else |
 
-Youth fixtures get moved by agreement between clubs long before FIKS knows about
-it. `Ny dato` is where that agreement lives, so the sync must never overwrite it
-— and a row where the two dates differ is reported, not "corrected". Leave the
-column out and there are no agreements to protect: everything simply follows
-fotball.no, which is what a straightforward fixture list wants.
+A cell containing a formula is never overwritten, whatever column it is in.
+
+## Row formatting
+
+Format a `Lag` cell in `config` — background, text colour, bold, italic,
+underline, borders, font, alignment — and every fixture row for that team ends
+up looking like that cell. The border wraps the whole row.
+
+The copy goes through Sheets' own paste-format-only, which is the only route
+that carries borders: Apps Script can set them but has no way to read them.
+That also brings the number format along, which would turn dates and times into
+raw numbers — so number formats are snapshotted and put back afterwards, and
+the date columns and `Kommentar` get their own colours and fonts restored while
+keeping the new border — those three are yours, so the team's colours stay off
+them.
+
+`Formater rader` in `config` controls how far this goes:
+
+| Verdi | Effect |
+|---|---|
+| `alle` *(default)* | Every `Lag` cell drives its rows, formatted-looking or not. The only mode where a border-only cell works — since borders can't be read back, such a cell is indistinguishable from an empty one. The trade: `config` owns row appearance, so styling applied directly to rows is overwritten on the next sync. |
+| `markerte` | Only cells with a visible marking — colour, bold, italic, underline, font, alignment. Rows for teams with a plain cell are left alone. Safe if you colour rows by hand, but border-only won't work. |
+| `nei` | No formatting at all. |
+
+Formatting runs at the end of any sync that wrote something, and on demand from
+**LFK kamper → Formater rader etter lag**. Matching is on the team name as
+written in the sheet, which after a sync is fotball.no's spelling — so run one
+sync before expecting a hand-written sheet to pick up colours.
 
 ## Three things that were not obvious
 
@@ -114,6 +134,7 @@ spreadsheet can track several squads independently.
 | Lag | Lillehammer G16-2 | |
 | Varsle e-post | din@epost.no | annen@epost.no |
 | Sorter etter dato | ja | ja |
+| Formater rader | alle | nei |
 
 A key may repeat down the rows — that is how `Lag` becomes a list — and blank
 cells simply mean that column does not use that row. Each column gets its own
@@ -131,6 +152,10 @@ by content: the first tab that isn't `config` and has a `Turnering` header.
 
 `Lag` is matched as a **prefix**, so `Lillehammer G16` catches `G16-1`, `G16-2`
 *and* `G16-3`. Be as specific as the teams you actually want.
+
+Reports name the teams a prefix actually matched rather than the prefix itself,
+and call out any prefix that matched nothing — usually a team with no fixtures
+left, or one renamed after moving up an age group.
 
 Selecting by team rather than by series is deliberate: a team keeps its name for
 a season, while series names change every time the squad moves up an age group.

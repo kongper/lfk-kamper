@@ -49,10 +49,16 @@ them.
 | `markerte` | Only cells with a visible marking — colour, bold, italic, underline, font, alignment. Rows for teams with a plain cell are left alone. Safe if you colour rows by hand, but border-only won't work. |
 | `nei` | No formatting at all. |
 
-Formatting runs at the end of any sync that wrote something, and on demand from
-**LFK kamper → Formater rader etter lag**. Matching is on the team name as
-written in the sheet, which after a sync is fotball.no's spelling — so run one
-sync before expecting a hand-written sheet to pick up colours.
+Formatting runs at the end of **every** sync, whether or not any fixture
+changed — you may have edited a colour in `config`, and the rows should follow.
+It is also available on its own as **LFK kamper → Oppdater formatering**.
+
+Matching is on the team name as written in the sheet, which after a sync is
+fotball.no's spelling — so run one sync before expecting a hand-written sheet to
+pick up colours.
+
+There is no separate preview item in the menu: *Kjør synk* shows the full report
+and asks before writing, so answering No is the preview.
 
 ## Three things that were not obvious
 
@@ -110,8 +116,8 @@ Then, once, from the Apps Script editor:
 
 - Run **`setup()`**. It creates the `config` tab, installs the nightly trigger,
   and prints an API token to the execution log.
-- Reload the spreadsheet. An **LFK kamper** menu appears with *Forhåndsvis synk* and
-  *Kjør synk*.
+- Reload the spreadsheet. An **LFK kamper** menu appears with *Kjør synk* and
+  *Oppdater formatering*.
 
 To find your `scriptId`: open the sheet, **Extensions → Apps Script**, then
 **⚙ Project Settings**.

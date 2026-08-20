@@ -55,10 +55,12 @@ Run from the skill directory. Credentials come from `~/.lfk-kamper.json` or the
 | `apply --only KEY` | Writes only those match keys |
 | `apply --force` | Overrides the mass-insert guard (see below) |
 
-There is also a **LFK kamper menu inside the sheet** with Forhåndsvis synk and Kjør
-synk. The user can run the whole thing without you, and the nightly trigger
-runs without either of you. If the web app is unreachable, say so and point at
-the menu rather than treating the sync as broken.
+There is also a **LFK kamper menu inside the sheet** with *Kjør synk* and
+*Oppdater formatering*. `Kjør synk` shows the whole report and asks before
+writing, so it doubles as the preview. The user can run everything without you,
+and the nightly trigger runs without either of you — if the web app is
+unreachable, say so and point at the menu rather than treating the sync as
+broken.
 
 ```bash
 python3 scripts/lfk.py preview
@@ -166,9 +168,11 @@ at the cost of `config` owning row appearance outright — anything styled
 directly on a row is overwritten next sync. If a user wants to hand-colour
 individual rows, `markerte` is the mode for them.
 
-It runs automatically after any sync that wrote something, and on demand via the
-`format` action or the sheet menu. Matching uses the team name as written in the
-sheet, which after a sync is fotball.no's spelling.
+It runs at the end of **every** sync, changed fixtures or not, since a colour
+edited in `config` should reach the rows without waiting for a reschedule. Also
+available on its own via the `format` action or *Oppdater formatering*. Matching
+uses the team name as written in the sheet, which after a sync is fotball.no's
+spelling.
 
 ## How rows are matched, and the guard around it
 

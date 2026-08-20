@@ -201,7 +201,7 @@ const MAIN = {
           getFormulas: () => sheetValues.map((row, ri) => row.map((_, ci) =>
             (sandbox.FORMULAS_ON && ri > 0 && ci === C['Tid']) ? '=X' + (ri + 1) : ''))
         }),
-        getLastColumn: () => HEADER.length,
+        getLastColumn: () => HEADER.length + (sandbox.EXTRA_COLS || 0),
         getLastRow: () => sheetValues.length,
         getRange: (r, c, nr, nc) => ({
           setValue: v => written.push([r, c, v]),
@@ -545,6 +545,17 @@ check('one whole-format copy per matched row', COPIES.length, 10);
 check('the copy spans the full row, so the border wraps it',
   COPIES.every(c => c.c1 === 1 && c.c2 === HEADER.length && c.r1 === c.r2), true);
 
+// Stray content out to the right must not drag the formatting with it: the
+// header row defines the table, not the sheet's last populated column.
+sandbox.EXTRA_COLS = 6;
+const savedRestore = (FMT.restoreCols || []).slice();
+COPIES = [];
+sandbox.applyRowFormats_(sandbox.locateTable_({ sheetName: 'Kamper' }), sandbox.loadProfiles_()[0]);
+check('columns beyond the table are left alone',
+  COPIES.every(c => c.c2 === HEADER.length), true);
+sandbox.EXTRA_COLS = 0;
+FMT.restoreCols = savedRestore;
+
 const matchedRows = sheetValues.slice(1)
   .map((r, i2) => (r[C['Hjemmelag']] === 'Lillehammer G15-2' || r[C['Bortelag']] === 'Lillehammer G15-2') ? i2 + 2 : null)
   .filter(Boolean);
@@ -557,6 +568,31 @@ check('the date and Kommentar columns get their own look restored afterwards',
 
 CELL_FMT = {}; COPIES = []; setFormatMode(null);
 sheetValues.splice(1, sheetValues.length - 1, ...SHORT_ROWS);
+
+console.log('\n--- formatting no longer waits for a data change ---');
+setFormatMode(null);
+CELL_FMT = {}; COPIES = []; delete FMT.restoreCols;
+// Formatting matches the names as written in the sheet, which after a sync are
+// fotball.no's. Put the harness in that state, as the production sheet is.
+const QUIET_SHORT = sheetValues.slice(1).map(r => r.slice());
+sheetValues.slice(1).forEach(r => {
+  const serie = r[C['Turnering']];
+  if (!serie) return;
+  r[C['Hjemmelag']] = longOf(r[C['Hjemmelag']], serie);
+  r[C['Bortelag']] = longOf(r[C['Bortelag']], serie);
+});
+// A plan with nothing to write at all.
+const quiet = {
+  sheetName: 'Kamper', teams: ['Lillehammer G15-1'], sortAfterSync: true,
+  updates: [], additions: [], missingFromFeed: [], suspect: false, learnedNames: {}
+};
+const quietRes = sandbox.applyPlan_(quiet);
+check('nothing is written to cells', [quietRes.cellsWritten, quietRes.rowsAdded], [0, 0]);
+check('sorting is skipped — there is nothing to reorder', quietRes.sort.sorted, false);
+check('but the formatting still runs', quietRes.format.formatted > 0, true);
+check('  ... and actually copies', COPIES.length > 0, true);
+COPIES = [];
+sheetValues.splice(1, sheetValues.length - 1, ...QUIET_SHORT);
 
 console.log('\n--- the report ---');
 const rp = sandbox.renderPlan_({

@@ -248,24 +248,29 @@ function setup() {
 // navn som private og nekter å kalle dem fra en meny.
 
 function onOpen() {
+  // Ingen egen forhåndsvisning: "Kjør synk" viser planen og spør først, så et
+  // eget menyvalg ville vært samme handling med "nei" som svar.
   SpreadsheetApp.getUi().createMenu('LFK kamper')
-    .addItem('Forhåndsvis synk', 'menuPreview')
     .addItem('Kjør synk', 'menuApply')
-    .addSeparator()
-    .addItem('Formater rader etter lag', 'menuFormat')
+    .addItem('Oppdater formatering', 'menuFormat')
     .addToUi();
-}
-
-function menuPreview() {
-  const plans = buildPlans_();
-  showText_('Forhåndsvisning', plans.map(renderPlan_).join('\n\n' + '='.repeat(60) + '\n\n'));
 }
 
 function menuApply() {
   const plans = buildPlans_();
   const pending = plans.filter(function (p) { return p.updates.length + p.additions.length; });
   const body = plans.map(renderPlan_).join('\n\n' + '='.repeat(60) + '\n\n');
-  if (!pending.length) { showText_('Synk', body); return; }
+
+  // Ingen kampendringer: vis rapporten og oppdater formateringen likevel, for
+  // det er ofte nettopp den man er ute etter når man kjører synken på nytt.
+  if (!pending.length) {
+    const fmt = loadProfiles_().map(function (prof) {
+      const res = applyRowFormats_(locateTable_(prof), prof);
+      return prof.sheetName + ': ' + res.formatted + ' rader formatert';
+    });
+    showText_('Synk', body + '\n\n---\nIngen kampendringer. Formatering oppdatert:\n' + fmt.join('\n'));
+    return;
+  }
 
   const ui = SpreadsheetApp.getUi();
   if (ui.alert('Kjør synk?', body + '\n\nSkrive dette til arkene?', ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
@@ -292,7 +297,7 @@ function menuFormat() {
         ? 'ingen Lag-celler er markert — sett "Formater rader" til "alle" hvis du bare har ramme'
         : 'formatering er slått av ("Formater rader" = nei)');
   });
-  showText_('Formatering', lines.join('\n') + '\n\n' +
+  showText_('Oppdater formatering', lines.join('\n') + '\n\n' +
     'Formatet hentes fra Lag-cellene i arket "' + CONFIG.CONFIG_SHEET + '".\n' +
     'Gi cellen bakgrunn, tekstfarge, ramme, fet, kursiv eller understrek — så\n' +
     'følger radene til det laget etter. Datokolonnene beholder sine egne farger\n' +
@@ -357,7 +362,12 @@ function json_(obj) {
 function nightly() {
   buildPlans_().forEach(function (plan) {
     const notable = plan.updates.length + plan.additions.length + plan.missingFromFeed.length;
-    if (notable === 0) return;
+    if (notable === 0) {
+      // Rolig natt for kampene, men config kan ha fått en ny farge.
+      const prof = loadProfiles_().filter(function (p) { return norm_(p.sheetName) === norm_(plan.sheetName); })[0];
+      if (prof) applyRowFormats_(locateTable_(prof), prof);
+      return;
+    }
 
     const res = applyPlan_(plan);
     const body = renderPlan_(plan) +
@@ -633,7 +643,14 @@ function applyRowFormats_(t, profile) {
 
   const first = t.headerRow + 2;
   const rowCount = t.sheet.getLastRow() - first + 1;
-  const width = t.sheet.getLastColumn();
+
+  // Bredden er tabellens, ikke arkets. getLastColumn() strekker seg til siste
+  // celle med innhold hvor som helst i arket, så en løsrevet notat-kolonne ute
+  // til høyre ville fått lagets farger den også. Overskriftsraden definerer
+  // tabellen — siste utfylte overskrift er siste kolonne.
+  const width = t.header.reduce(function (n, h, i) {
+    return String(h).trim() ? i + 1 : n;
+  }, 0);
   if (rowCount < 1 || width < 1) return { formatted: 0, teams: formats.length, mode: profile.formatMode || 'alle' };
 
   // Datoene har sitt eget tallformat, og Kommentar er din kolonne — begge
@@ -862,18 +879,20 @@ function applyPlan_(plan) {
     rowsAdded = newRows.length;
   }
 
-  let sort = { sorted: false, reason: 'ikke bedt om' };
-  let format = { formatted: 0, teams: 0 };
-  if (cellsWritten || rowsAdded) {
+  // Sortering har bare noe å gjøre når noe er skrevet.
+  let sort = { sorted: false, reason: 'ingenting skrevet' };
+  if ((cellsWritten || rowsAdded) && plan.sortAfterSync) {
     // Ny tabellstruktur etter innsetting, så les den om igjen før sortering.
-    if (plan.sortAfterSync) {
-      sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
-      if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
-    }
-    // Formateres etter sortering — radene har flyttet på seg.
-    const prof = loadProfiles_().filter(function (p) { return norm_(p.sheetName) === norm_(plan.sheetName); })[0];
-    if (prof) format = applyRowFormats_(locateTable_({ sheetName: plan.sheetName }), prof);
+    sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
+    if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
   }
+
+  // Formateringen kjøres uansett. Den henger ikke på om en dato har flyttet
+  // seg — du kan ha endret en farge i config, og da skal radene følge etter.
+  // Etter sortering, siden radene kan ha byttet plass.
+  const prof = loadProfiles_().filter(function (p) { return norm_(p.sheetName) === norm_(plan.sheetName); })[0];
+  const format = prof ? applyRowFormats_(locateTable_({ sheetName: plan.sheetName }), prof)
+                      : { formatted: 0, teams: 0 };
 
   return {
     cellsWritten: cellsWritten,

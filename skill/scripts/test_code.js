@@ -55,10 +55,12 @@ Påfølgende dager||30.10.2026|30.10.2026|fredag|19:30|Otta|Lillehammer|Øya sta
 // them so the harness also proves those columns are simply ignored if present.
 const RAW_HEADER = ['Kommentar', 'Varsling', 'Dato', 'Ny dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering', 'KampID'];
 const DROP = ['Varsling', 'KampID', 'Ny dato'];
-const HEADER = RAW_HEADER.filter(h => !DROP.includes(h));
+// Resultat henges på til slutt — kolonnen er ny, og ytterst i arket er der en
+// bruker faktisk ville lagt den.
+const HEADER = RAW_HEADER.filter(h => !DROP.includes(h)).concat(['Resultat']);
 const C = {}; HEADER.forEach((h, i) => C[h] = i);
 const keepIdx = RAW_HEADER.map((h, i) => DROP.includes(h) ? -1 : i).filter(i => i >= 0);
-const sheetRows = RAW.split('\n').map(l => { const p = l.split('|'); return keepIdx.map(i => p[i]); });
+const sheetRows = RAW.split('\n').map(l => { const p = l.split('|'); return keepIdx.map(i => p[i]).concat(['']); });
 const sheetValues = [HEADER].concat(sheetRows);
 
 // Long names as fotball.no writes them, so the feed is realistic.
@@ -138,6 +140,47 @@ const setFormatMode = m => {
   if (m) CONFIG_ROWS.push(['Formater rader', m]);
 };
 
+// ---- xlsx-fabrikk ----------------------------------------------------------
+//
+// Bygger de to XML-filene en ekte xlsx består av, så parseren i Code.js får
+// jobbe mot det formatet fotball.no faktisk sender. Tomme celler utelates
+// HELT, slik EPPlus gjør — det er den varianten som forskyver rader hvis
+// kolonnebokstaven ikke leses.
+const KOL = i => { let s = '', n = i + 1; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; };
+const XMLESC = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function xlsxParts(rows, inline) {
+  const strings = [];
+  const idx = s => { let i = strings.indexOf(s); if (i < 0) { strings.push(s); i = strings.length - 1; } return i; };
+
+  const rowXml = rows.map((r, ri) => '<row r="' + (ri + 1) + '">' + r.map((v, ci) => {
+    if (v === '' || v === null || v === undefined) return '';        // utelates helt
+    const ref = KOL(ci) + (ri + 1);
+    return inline
+      ? '<c r="' + ref + '" t="inlineStr"><is><t>' + XMLESC(v) + '</t></is></c>'
+      : '<c r="' + ref + '" t="s"><v>' + idx(String(v)) + '</v></c>';
+  }).join('') + '</row>').join('');
+
+  const parts = [{
+    getName: () => 'xl/worksheets/sheet1.xml',
+    getDataAsString: () => '<worksheet><sheetData>' + rowXml + '</sheetData></worksheet>'
+  }];
+  if (!inline) {
+    parts.unshift({
+      getName: () => 'xl/sharedStrings.xml',
+      getDataAsString: () => '<sst>' + strings.map(s => '<si><t>' + XMLESC(s) + '</t></si>').join('') + '</sst>'
+    });
+  }
+  return parts;
+}
+
+const XLSX_HEADER = ['Runde', 'Dato', 'Dag', 'Tid', 'Hjemmelag', 'Resultat',
+                     'Bortelag', 'Bane', 'Turnering', 'Kampnummer', 'Spillform'];
+// Lagnavnene her er Excel-eksportens korte form, ikke arkets — det er hele
+// poenget med koblingen.
+const xlRow = (dato, hjemme, res, borte, tur, knr) =>
+  ['4', dato, 'lørdag', '14:00', hjemme, res, borte, 'Stampesletta', tur, knr, '11 MOT 11'];
+
 // ---- Apps Script stubs -----------------------------------------------------
 const written = [];
 let appended = [];
@@ -151,10 +194,29 @@ const sandbox = {
   ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (s) => ({ setMimeType: () => s }) },
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
   UrlFetchApp: {
-    fetch: () => ({ getResponseCode: () => 200, getContentText: () => icsOf(sandbox.FEED) })
+    fetch: (url) => {
+      if (/klubb\/hjem/.test(url)) {
+        return { getResponseCode: () => sandbox.KLUBB_CODE || 200,
+                 getContentText: () => klubbHtml(sandbox.KLUBB_TOM ? [] : KLUBB_LAG) };
+      }
+      if (!/DownloadTeamExcelCalendar/.test(url)) {
+        return { getResponseCode: () => 200, getContentText: () => icsOf(sandbox.FEED) };
+      }
+      const id = (String(url).match(/teamId=(\d+)/) || [])[1] || '';
+      const code = (sandbox.XLSX_CODE || {})[id] || 200;
+      // Feil parameternavn eller ukjent lag: fotball.no svarer 200 med bare
+      // overskriftsrad. Harnesset må gjøre nøyaktig det samme.
+      const rows = (sandbox.XLSX_BY_ID || {})[id] || [];
+      return {
+        getResponseCode: () => code,
+        getContentText: () => 'PK',
+        getBlob: () => ({ setContentType: () => xlsxParts(rows, sandbox.XLSX_INLINE) })
+      };
+    }
   },
   Utilities: {
     getUuid: () => 'x',
+    unzip: (parts) => { if (sandbox.XLSX_BROKEN) throw new Error('ikke en zip'); return parts; },
     formatDate: (d, tz, fmt) => {
       const p = n => String(n).padStart(2, '0');
       if (fmt === 'HH:mm') return p(d.getHours()) + ':' + p(d.getMinutes());
@@ -171,9 +233,17 @@ const sandbox = {
       getSheetByName: (n) => n === 'config'
         ? { getName: () => 'config',
             getDataRange: () => ({ getValues: () => CONFIG_ROWS }),
+            getLastRow: () => CONFIG_ROWS.length,
             getRange: (r, c) => {
               const f = CELL_FMT[r + ',' + c] || {};
               return {
+                setValue: v => {
+                  while (CONFIG_ROWS.length < r) CONFIG_ROWS.push(['', '']);
+                  const row = CONFIG_ROWS[r - 1];
+                  while (row.length < c) row.push('');
+                  row[c - 1] = v;
+                  CONFIG_WRITES.push([r, c, v]);
+                },
                 getBackground: () => f.bg || '#ffffff',
                 getFontColor:  () => f.fg || '#000000',
                 getFontWeight: () => f.weight || 'normal',
@@ -186,6 +256,7 @@ const sandbox = {
                   COPIES.push({ c1: c1, c2: c2, r1: r1, r2: r2 })
               };
             } }
+        : n === 'system' ? (sandbox.NO_SYSTEM ? null : systemSheet)
         : n === 'Kamper' ? MAIN
         : (sandbox.WITH_DECOY && n === 'Notater') ? DECOY
         : null,
@@ -199,7 +270,7 @@ const MAIN = {
         getDataRange: () => ({
           getValues: () => sheetValues,
           getFormulas: () => sheetValues.map((row, ri) => row.map((_, ci) =>
-            (sandbox.FORMULAS_ON && ri > 0 && ci === C['Tid']) ? '=X' + (ri + 1) : ''))
+            (sandbox.FORMULAS_ON && ri > 0 && ci === (sandbox.FORMULA_COL === undefined ? C['Tid'] : sandbox.FORMULA_COL)) ? '=X' + (ri + 1) : ''))
         }),
         getLastColumn: () => HEADER.length + (sandbox.EXTRA_COLS || 0),
         getLastRow: () => sheetValues.length,
@@ -209,7 +280,7 @@ const MAIN = {
           getValues: () => sheetValues.slice(r - 1, r - 1 + (nr || 1)).map(row => row.slice(c - 1, c - 1 + (nc || 1))),
           getFormulas: () => Array.from({ length: nr || 1 }, () =>
             Array.from({ length: nc || 1 }, (_, ci) =>
-              (sandbox.FORMULAS_ON && (c - 1 + ci) === C['Tid']) ? '=X2' : '')),
+              (sandbox.FORMULAS_ON && (c - 1 + ci) === (sandbox.FORMULA_COL === undefined ? C['Tid'] : sandbox.FORMULA_COL)) ? '=X2' : '')),
           sort: (spec) => { sandbox.SORTED = spec; },
           getBackgrounds: () => grid(nr, nc, '#ffffff'),
           getFontColors:  () => grid(nr, nc, '#000000'),
@@ -230,6 +301,50 @@ const MAIN = {
 
 const grid = (r, c, v) => Array.from({ length: r || 1 }, () => Array.from({ length: c || 1 }, () => v));
 const FMT = {};
+const CONFIG_WRITES = [];
+
+// Arket "system", slik Per har satt det opp: verdilistene til nedtrekkene
+// øverst, og Lag/Lag-ID-tabellen lenger ned. At tabellen IKKE starter i A1 er
+// halve poenget med testen — den må finnes på overskriftene sine.
+let SYSTEM_ROWS = [];
+const systemSheet = {
+  getName: () => 'system',
+  getLastRow: () => SYSTEM_ROWS.length,
+  getDataRange: () => ({ getValues: () => SYSTEM_ROWS }),
+  getRange: (r, c) => ({
+    setValue: v => {
+      while (SYSTEM_ROWS.length < r) SYSTEM_ROWS.push([]);
+      const row = SYSTEM_ROWS[r - 1];
+      while (row.length < c) row.push('');
+      row[c - 1] = v;
+    },
+    getValues: () => [[(SYSTEM_ROWS[r - 1] || [])[c - 1] || '']]
+  })
+};
+const systemOppsett = () => [
+  ['Sorter etter dato', 'Formater rader'],
+  ['Ja', 'Alle'],
+  ['Nei', 'Markerte'],
+  ['', 'Nei'],
+  [], [], [], [], [], [],
+  ['Lag', 'Lag-ID'],
+  ['Lillehammer G15-1', ''],
+  ['Lillehammer G15-2', ''],
+  ['Lillehammer G16-1', ''],
+  ['Lillehammer G16-2', '']
+];
+
+// Klubbsidens markup, med hex-entiteter slik fotball.no faktisk skriver dem.
+const klubbHtml = (lag) => '<html><body><ul>' + lag.map(([navn, id]) =>
+  `<li><a class="x" href="/fotballdata/lag/hjem/?fiksId=${id}&amp;u=1">${navn}</a></li>`).join('') +
+  '</ul></body></html>';
+let KLUBB_LAG = [
+  ['Lillehammer G15-1', '136204'],
+  ['Lillehammer G15-1', '187246'],
+  ['Lillehammer G15-2', '155261'],
+  ['Lillehammer G16-1', '139037'],
+  ['Lillehammer G10 N. &#xC5;l - 1', '143573']
+];
 // Format on the config sheet's Lag cells, keyed "row,col" (1-based).
 let CELL_FMT = {};
 let COPIES = [];
@@ -633,6 +748,231 @@ check('exclude records what it skipped', ex.skipped.map(s => s.key), ['a']);
 const on = sandbox.filterPlan_(mk(), ['a', 'c'], null);
 check('only keeps just the named keys', [on.updates.map(u => u.key), on.additions.map(a => a.key)], [['a'], ['c']]);
 check('no filter keeps everything', (() => { const p = sandbox.filterPlan_(mk(), null, null); return [p.updates.length, p.additions.length, p.skipped.length]; })(), [2, 1, 0]);
+
+// ---- resultater fra Excel-eksporten ---------------------------------------
+
+console.log('\n--- erKampresultat_ ---');
+[['3 - 1', true], ['1-8', true], ['10 - 0', true], ['3 – 1', true],
+ ['-', false], ['', false], ['utsatt', false], [null, false]
+].forEach(([v, want]) => check('"' + v + '"', sandbox.erKampresultat_(v), want));
+
+console.log('\n--- xlTabell_: parsing av ekte xlsx-form ---');
+const blobOf = (rows, inline) => ({ setContentType: () => xlsxParts(rows, inline) });
+const enKamp = xlRow('18.08.2026', 'Lillehammer', '2 - 1', 'Stange', 'G15 Elite Høst', '04115111005');
+
+const tabS = sandbox.xlTabell_(blobOf([XLSX_HEADER, enKamp], false));
+check('sharedStrings: overskriftene', tabS.overskrift, XLSX_HEADER);
+check('sharedStrings: resultatet ligger i Resultat-kolonnen',
+  tabS.rader[0][XLSX_HEADER.indexOf('Resultat')], '2 - 1');
+
+const tabI = sandbox.xlTabell_(blobOf([XLSX_HEADER, enKamp], true));
+check('inlineStr gir nøyaktig samme tabell', tabI.rader[0], tabS.rader[0]);
+
+// Bane tom: cellen utelates helt fra XML-en, slik EPPlus gjør.
+const utenBane = enKamp.slice(); utenBane[XLSX_HEADER.indexOf('Bane')] = '';
+const tabH = sandbox.xlTabell_(blobOf([XLSX_HEADER, utenBane], false));
+check('en utelatt celle forskyver ikke resten av raden',
+  [tabH.rader[0][XLSX_HEADER.indexOf('Bane')], tabH.rader[0][XLSX_HEADER.indexOf('Turnering')]],
+  ['', 'G15 Elite Høst']);
+
+console.log('\n--- fetchResults_ ---');
+sandbox.XLSX_BY_ID = { '136204': [XLSX_HEADER, enKamp,
+  xlRow('21.10.2026', 'Brumunddal', '-', 'Lillehammer', 'G15 Elite Høst', '04115111040')] };
+
+const r1 = sandbox.fetchResults_({ teamIds: ['136204'] });
+check('bare spilte kamper havner i oppslaget', r1.resultCount, 1);
+check('nøkkelen er den samme som arket bruker',
+  r1.byKey[sandbox.matchKey_('G15 Elite Høst', 'Lillehammer G15-1', 'Stange  G15-1')], '2 - 1');
+check('ikke spilt ("-") gir ingen oppføring',
+  r1.byKey[sandbox.matchKey_('G15 Elite Høst', 'Brumunddal  G15-1', 'Lillehammer G15-1')], undefined);
+check('ingen advarsler når det går bra', r1.warnings.length, 0);
+
+// Feil ID: fotball.no svarer 200 med et ark som bare har overskriftsrad.
+sandbox.XLSX_BY_ID['999999'] = [XLSX_HEADER];
+const r0 = sandbox.fetchResults_({ teamIds: ['999999'] });
+check('0 rader er en feil å si fra om, ikke "ingen kamper"', r0.warnings.length, 1);
+check('advarselen peker på den faktiske fella', /fiksId/.test(r0.warnings[0]), true);
+
+// Et ødelagt svar må ikke ende i samme diagnose som det tomme arket.
+sandbox.XLSX_BROKEN = true;
+const rBad = sandbox.fetchResults_({ teamIds: ['136204'] });
+check('noe som ikke er et regneark får sin egen melding',
+  /ikke et regneark/.test(rBad.warnings[0] || ''), true);
+sandbox.XLSX_BROKEN = false;
+
+const rIngen = sandbox.fetchResults_({ teamIds: [] });
+check('uten Lag-ID hentes ingenting, og det sies fra', rIngen.warnings.length, 1);
+check('kolonnen blir stående urørt', Object.keys(rIngen.byKey).length, 0);
+
+sandbox.XLSX_CODE = { '136204': 500 };
+check('en 500 fra fotball.no stopper ikke synken, den varsler',
+  sandbox.fetchResults_({ teamIds: ['136204'] }).warnings.length, 1);
+sandbox.XLSX_CODE = {};
+
+console.log('\n--- buildPlan_ med resultater ---');
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683'],
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2'],
+  ['Varsle e-post', 'din@epost.no'],
+  ['Sorter etter dato', 'ja']
+];
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[13][1] = '136204';                     // Lillehammer G16-1
+check('profilen henter Lag-ID fra system-arket', sandbox.loadProfiles_()[0].teamIds, ['136204']);
+// De to øverste radene i arket er spilt og finnes ikke i kalenderen — nettopp
+// derfor er de prøvesteinen: får de resultat, virker koblingen der den må.
+sandbox.XLSX_BY_ID = { '136204': [XLSX_HEADER,
+  // "Lillehammer 9" nøkler ikke likt "Lillehammer" — samme slag bom som
+  // "Kvinner 2" mot "2". Raden skal likevel få resultatet, via datoen.
+  xlRow('08.08.2026', 'Lillehammer 9', '3 - 0', 'Nordstrand', 'G16 Interkrets', '04116101001'),
+  xlRow('15.08.2026', 'Hasle-Løren', '1 - 2', 'Lillehammer', 'G16 Interkrets', '04116101002'),
+  xlRow('21.10.2026', 'Brumunddal', '-', 'Lillehammer', 'G15 Elite Høst', '04115111040')] };
+
+const planR = sandbox.buildPlans_()[0];
+const resChanges = planR.updates
+  .map(u => ({ row: u.row, res: (u.changes.find(c => c.column === 'Resultat') || {}).to }))
+  .filter(x => x.res);
+check('begge spilte kamper får resultat, selv uten treff i kalenderen',
+  resChanges, [{ row: 2, res: '3 - 0' }, { row: 3, res: '1 - 2' }]);
+check('teller det som faktisk ble skrevet', planR.resultsWritten, 2);
+check('og hvor mange som måtte kobles på dato', planR.resultsOnDate, 1);
+check('rapporten sier fra om at datoen ble brukt',
+  /koblet på dato, ikke navn/.test(sandbox.renderPlan_(planR)), true);
+check('en kamp som ikke er spilt får ingenting',
+  planR.updates.some(u => /Brumunddal/.test(u.label) &&
+                          u.changes.some(c => c.column === 'Resultat')), false);
+check('resultatrader dukker ikke opp som nye kamper', planR.additions.length, 0);
+check('og utløser ikke sperren mot masseinnlegg', planR.suspect, false);
+check('rapporten nevner resultatene', /RESULTATER \(2 /.test(sandbox.renderPlan_(planR)), true);
+
+console.log('\n--- resultat: formelvern og gjentatt kjøring ---');
+sandbox.FORMULAS_ON = true;
+sandbox.FORMULA_COL = C['Resultat'];
+check('en formel i Resultat-cellen overskrives ikke',
+  sandbox.buildPlans_()[0].updates.some(u => u.changes.some(c => c.column === 'Resultat')), false);
+sandbox.FORMULAS_ON = false;
+sandbox.FORMULA_COL = undefined;
+
+// Samme resultat en gang til skal ikke bli en endring — ellers ville hver
+// nattkjøring meldt fra om kamper som ikke har rørt seg.
+sheetValues[1][C['Resultat']] = '3 - 0';
+sheetValues[2][C['Resultat']] = '1 - 2';
+check('uendret resultat gir ingen skriving', sandbox.buildPlans_()[0].resultsWritten, 0);
+sheetValues[1][C['Resultat']] = '';
+sheetValues[2][C['Resultat']] = '';
+
+// Et ark uten kolonnen skal ikke laste ned noe i det hele tatt.
+let lastetNed = 0;
+const ekteFetch = sandbox.UrlFetchApp.fetch;
+sandbox.UrlFetchApp.fetch = (url) => { if (/Excel/.test(url)) lastetNed++; return ekteFetch(url); };
+const utenKolonne = HEADER.indexOf('Resultat');
+HEADER.splice(utenKolonne, 1);
+sheetValues.forEach(r => r.splice(utenKolonne, 1));
+sandbox.buildPlans_();
+check('uten Resultat-kolonne hentes eksporten ikke', lastetNed, 0);
+HEADER.splice(utenKolonne, 0, 'Resultat');
+sheetValues.forEach(r => r.splice(utenKolonne, 0, ''));
+sandbox.UrlFetchApp.fetch = ekteFetch;
+
+console.log('\n--- xlDato_ og forsteOrd_ ---');
+check('serienummer til dato', sandbox.xlDato_(46032.395833333336), '10.01.2026');
+check('heltall uten klokkeslett', sandbox.xlDato_(46289), '24.09.2026');
+check('tekst slipper gjennom urørt', sandbox.xlDato_('18.08.2026'), '18.08.2026');
+check('tom celle blir tom', sandbox.xlDato_(''), '');
+check('klubbnavnet er første ord', sandbox.forsteOrd_('Øyer-Tretten IF/Faaberg IL 2 9er'), 'øyer-tretten');
+check('og skråstrek teller som skille', sandbox.forsteOrd_('Skreia IL 2/Kolbu KK Kvinner 2 9er'), 'skreia');
+
+console.log('\n--- resultat når lagnavnene ikke lar seg forene ---');
+// Seniorlagene: arket har "Lillehammer Kvinner 2", eksporten "Lillehammer 2".
+check('navnenøkkelen bommer, som forventet',
+  sandbox.matchKey_('5. div kvinner avd. 01', 'Øyer-Tretten IF/Faaberg IL 2 9er', 'Lillehammer Kvinner 2') ===
+  sandbox.matchKey_('5. div kvinner avd. 01', 'Øyer-Tretten/Faaberg 2 9er', 'Lillehammer 2'), false);
+
+const kvinneRader = { rader: [
+  { serie: '5. div kvinner avd. 01', home: 'Øyer-Tretten/Faaberg 2 9er', away: 'Lillehammer 2',
+    dato: '18.08.2026', resultat: '2 - 6' }
+] };
+const kvinneRad = { serie: '5. div kvinner avd. 01', home: 'Øyer-Tretten IF/Faaberg IL 2 9er',
+                    away: 'Lillehammer Kvinner 2', dato: '18.08.2026' };
+check('men turnering + dato + klubbnavn finner den',
+  sandbox.resultatPaaDato_(kvinneRader, kvinneRad, {}), '2 - 6');
+
+check('feil dato gir ingenting',
+  sandbox.resultatPaaDato_(kvinneRader, Object.assign({}, kvinneRad, { dato: '19.08.2026' }), {}), null);
+check('en annen klubb på samme dato gir ingenting',
+  sandbox.resultatPaaDato_(kvinneRader, Object.assign({}, kvinneRad, { home: 'Vind IL Kvinner 1' }), {}), null);
+
+const toKandidater = { rader: [kvinneRader.rader[0],
+  Object.assign({}, kvinneRader.rader[0], { resultat: '1 - 1' })] };
+check('to kandidater er tvetydig, og da skrives ingenting',
+  sandbox.resultatPaaDato_(toKandidater, kvinneRad, {}), null);
+
+const brukt = {};
+sandbox.resultatPaaDato_(kvinneRader, kvinneRad, brukt);
+check('en eksportrad brukes bare én gang',
+  sandbox.resultatPaaDato_(kvinneRader, kvinneRad, brukt), null);
+
+console.log('\n--- lagIdKart_ / teamIdsFor_ ---');
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[11][1] = '136204, 187246';
+SYSTEM_ROWS[12][1] = '155261';
+check('to ID-er i én celle blir to ID-er',
+  sandbox.teamIdsFor_(['Lillehammer G15-1']), ['136204', '187246']);
+check('prefiks treffer flere lag',
+  sandbox.teamIdsFor_(['Lillehammer G15']), ['136204', '187246', '155261']);
+check('et lag uten ID gir ingenting, ikke en tom streng',
+  sandbox.teamIdsFor_(['Lillehammer G16-2']), []);
+check('søppel i cellen forkastes', sandbox.splitIder_('136204; ukjent 187246'), ['136204', '187246']);
+sandbox.NO_SYSTEM = true;
+check('uten system-ark faller alt tilbake til tomt, ikke en feil',
+  sandbox.teamIdsFor_(['Lillehammer G15-1']), []);
+sandbox.NO_SYSTEM = false;
+
+console.log('\n--- hentLagIder (skraping, menyvalg) ---');
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[13][1] = '999999';                     // G16-1 har feil ID fra før
+SYSTEM_ROWS.splice(14, 1);                         // G16-2 mangler i tabellen
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683'],
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2'],
+  ['Varsle e-post', 'din@epost.no']
+];
+const raden = navn => SYSTEM_ROWS.find(r => r[0] === navn) || [];
+const rapport = sandbox.hentLagIder();
+
+check('nytt lag fra config legges til nederst', raden('Lillehammer G16-2')[0], 'Lillehammer G16-2');
+check('tom celle fylles', raden('Lillehammer G15-2')[1], '155261');
+check('to registreringer havner i samme celle', raden('Lillehammer G15-1')[1], '136204, 187246');
+check('en celle som allerede har verdi overskrives ikke', raden('Lillehammer G16-1')[1], '999999');
+check('avviket rapporteres i stedet', /999999.*139037/.test(rapport), true);
+check('lag uten treff hos fotball.no sies fra om', /UTEN TREFF[\s\S]*Lillehammer G16-2/.test(rapport), true);
+check('ingen rader forsvant, og den nye kom til',
+  SYSTEM_ROWS.filter(r => /^Lillehammer/.test(r[0] || '')).map(r => r[0]),
+  ['Lillehammer G15-1', 'Lillehammer G15-2', 'Lillehammer G16-1', 'Lillehammer G16-2']);
+check('verdilistene øverst er urørt', [SYSTEM_ROWS[0][0], SYSTEM_ROWS[3][1]], ['Sorter etter dato', 'Nei']);
+check('hex-entiteter i lagnavn dekodes', sandbox.klubbLagFraNett_('1683')[4].navn, 'Lillehammer G10 N. Ål - 1');
+
+// Kjør en gang til: nå skal ingenting skrives, og det skal fortelles.
+const rapport2 = sandbox.hentLagIder();
+check('andre kjøring finner ingenting nytt å fylle', /FYLT INN/.test(rapport2), false);
+check('og teller de uendrede', /Uendret: 2 lag/.test(rapport2), true);
+
+sandbox.KLUBB_TOM = true;
+let skrapefeil = '';
+try { sandbox.hentLagIder(); } catch (e) { skrapefeil = String(e.message || e); }
+check('null laglenker er en feil, ikke "klubben har ingen lag"',
+  /endret oppbygning/.test(skrapefeil), true);
+sandbox.KLUBB_TOM = false;
+
+sandbox.KLUBB_CODE = 503;
+skrapefeil = '';
+try { sandbox.hentLagIder(); } catch (e) { skrapefeil = String(e.message || e); }
+check('en 503 sier hva som svarte hva', /503/.test(skrapefeil), true);
+sandbox.KLUBB_CODE = 0;
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

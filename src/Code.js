@@ -50,6 +50,7 @@ const CONFIG = {
   SHEET_NAME: null,                   // null = første ark. Sett navnet hvis
                                       // arket ikke er det første i dokumentet.
   CONFIG_SHEET: 'config',
+  SYSTEM_SHEET: 'system',        // holder tabellen lagnavn -> Lag-ID
   TIMEZONE: 'Europe/Oslo',
   NIGHTLY_HOUR: 5,
   DEFAULTS: {
@@ -70,7 +71,22 @@ function feedUrl_(clubId) {
   return 'https://www.fotball.no/footballapi/Calendar/GetCalendarForClub?clubId=' + clubId;
 }
 
-const COLS = ['Kommentar', 'Dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering'];
+/**
+ * Excel-eksporten for ETT lag. Den har det kalenderstrømmen ikke har: spilte
+ * kamper, og resultatet deres.
+ *
+ * Parameteren MÅ hete teamId. Med fiksId svarer fotball.no 200 med et ark som
+ * bare har overskriftsrad — ingen feilmelding, bare null rader. Derfor
+ * behandles 0 rader som noe å si fra om, aldri som "laget har ingen kamper".
+ *
+ * Klubbversjonen (DownloadClubExcelCalendar) finnes også, men den kappes ved
+ * 1000 rader og mister slutten av sesongen. Målt og forkastet 20.08.2026.
+ */
+function resultsUrl_(teamId) {
+  return 'https://www.fotball.no/footballapi/Calendar/DownloadTeamExcelCalendar?teamId=' + teamId;
+}
+
+const COLS = ['Kommentar', 'Dato', 'Dag', 'Tid', 'Hjemmelag', 'Bortelag', 'Bane', 'Turnering', 'Resultat'];
 // Bare det som trengs for å kjenne igjen en rad og feste en dato på den.
 // Alt annet — Dag, Tid, Bane, Kommentar — er valgfritt, og en kolonne som ikke
 // finnes blir hverken lest eller skrevet.
@@ -156,10 +172,212 @@ function buildProfile_(sheetName, raw) {
     sheetName: sheetName || (pick('Ark') || [''])[0],
     clubId: (pick('Klubb-ID') || ['1683'])[0],
     teams: teams,
+    // Lag-ID står i arket "system", ikke her — ett sted, slått opp på lagnavn.
+    teamIds: teamIdsFor_(teams),
     notifyEmail: (pick('Varsle e-post') || [''])[0],
     sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0]),
     formatMode: norm_((pick('Formater rader') || ['alle'])[0])
   };
+}
+
+// ------------------------------------------------------------ LAG-ID-TABELL -
+
+/**
+ * Arket "system" holder oversettelsen lagnavn -> Lag-ID. Tabellen kjennes igjen
+ * på to nabooverskrifter, "Lag" og "Lag-ID", og kan stå hvor som helst i arket
+ * — det ligger annet innhold der fra før.
+ *
+ * Tabellen er varig: rader legges til, aldri fjernes. Et lag som har spilt
+ * ferdig sesongen skal fortsatt kunne slås opp, og en tom celle er alltid
+ * brukerens valg å ta.
+ */
+function finnLagTabell_() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG.SYSTEM_SHEET);
+  if (!sheet) return null;
+
+  const values = sheet.getDataRange().getValues();
+  let hRow = -1, lagCol = -1;
+  for (var r = 0; r < values.length && hRow === -1; r++) {
+    for (var c = 0; c + 1 < values[r].length; c++) {
+      if (norm_(values[r][c]) === 'lag' && norm_(values[r][c + 1]) === 'lag-id') {
+        hRow = r; lagCol = c; break;
+      }
+    }
+  }
+  if (hRow === -1) return null;
+
+  // Hull i lista hoppes over i stedet for å avslutte den — en luftrad midt i
+  // tabellen skal ikke gjøre lagene under usynlige.
+  const rader = [];
+  let sisteMedNavn = hRow;
+  for (var i = hRow + 1; i < values.length; i++) {
+    const navn = String(values[i][lagCol] || '').trim();
+    if (!navn) continue;
+    sisteMedNavn = i;
+    rader.push({ navn: navn, ider: splitIder_(values[i][lagCol + 1]), rad: i + 1 });
+  }
+
+  return {
+    sheet: sheet, lagCol: lagCol + 1, idCol: lagCol + 2, rader: rader,
+    nesteRad: Math.max(sisteMedNavn + 2, hRow + 2),
+    brukteRader: values.length
+  };
+}
+
+/** "136204, 187246" -> ['136204','187246']. Alt som ikke er sifre forkastes. */
+function splitIder_(v) {
+  return String(v == null ? '' : v).split(/[^0-9]+/).filter(function (s) { return s.length > 0; });
+}
+
+/** Lagnavn (normalisert) -> liste med Lag-ID. Tom hvis arket ikke finnes. */
+function lagIdKart_() {
+  const tab = finnLagTabell_();
+  const kart = {};
+  if (!tab) return kart;
+  tab.rader.forEach(function (r) {
+    if (r.ider.length) kart[norm_(r.navn)] = (kart[norm_(r.navn)] || []).concat(r.ider);
+  });
+  return kart;
+}
+
+/**
+ * Lag-ID-ene for lagene et oppsett følger. "Lag" i config er prefikser, så
+ * oppslaget er prefiksbasert her også — ellers ville "Lillehammer G16" ikke
+ * funnet "Lillehammer G16-1" i tabellen.
+ */
+function teamIdsFor_(teams) {
+  const kart = lagIdKart_();
+  const ut = [];
+  Object.keys(kart).forEach(function (navn) {
+    const treff = teams.some(function (pfx) { return navn.indexOf(norm_(pfx)) === 0; });
+    if (!treff) return;
+    kart[navn].forEach(function (id) { if (ut.indexOf(id) === -1) ut.push(id); });
+  });
+  return ut;
+}
+
+/**
+ * Henter Lag-ID fra fotball.no og fyller ut tabellen i "system".
+ *
+ * Dette ER skraping: ID-en står ingen andre steder enn i lenkene på klubbens
+ * lagoversikt, så den må leses ut av HTML-en. Derfor ligger den her, som et
+ * menyvalg du trykker på, og ikke i nattjobben — bryter fotball.no oppsettet
+ * sitt, skal det ramme en handling du står og ser på, ikke en synk som går
+ * mens du sover.
+ *
+ * To regler:
+ *   Nye lag fra config legges til i tabellen. Ingen rad fjernes noen gang.
+ *   Tomme ID-celler fylles. En celle som allerede har en verdi røres ikke —
+ *   avvik rapporteres i stedet, så du bestemmer selv om den skal byttes.
+ */
+function hentLagIder() {
+  const tab = finnLagTabell_();
+  if (!tab) {
+    throw new Error('Fant ingen tabell i arket "' + CONFIG.SYSTEM_SHEET + '". ' +
+      'Den kjennes igjen på to nabooverskrifter: "Lag" og "Lag-ID".');
+  }
+
+  const profiles = loadProfiles_();
+  const L = [];
+
+  // 1. Nye lagnavn fra config inn i tabellen.
+  const finnes = {};
+  tab.rader.forEach(function (r) { finnes[norm_(r.navn)] = true; });
+
+  const nye = [];
+  profiles.forEach(function (p) {
+    p.teams.forEach(function (navn) {
+      if (finnes[norm_(navn)]) return;
+      finnes[norm_(navn)] = true;
+      nye.push(navn);
+    });
+  });
+  nye.forEach(function (navn, i) {
+    const rad = tab.nesteRad + i;
+    tab.sheet.getRange(rad, tab.lagCol).setValue(navn);
+    tab.rader.push({ navn: navn, ider: [], rad: rad });
+  });
+  if (nye.length) L.push('Nye lag lagt til: ' + nye.join(', '));
+
+  // 2. Klubbens lagliste fra nett, én gang per klubb-ID.
+  const klubber = [];
+  profiles.forEach(function (p) { if (klubber.indexOf(p.clubId) === -1) klubber.push(p.clubId); });
+
+  const fraNett = [];
+  klubber.forEach(function (id) { klubbLagFraNett_(id).forEach(function (x) { fraNett.push(x); }); });
+  L.push('Leste ' + fraNett.length + ' lag fra fotball.no.');
+  L.push('');
+
+  // 3. Fyll tomme celler, rapporter resten.
+  const fylt = [], avvik = [], utenTreff = [], uendret = [];
+
+  tab.rader.forEach(function (r) {
+    const n = norm_(r.navn);
+    let treff = fraNett.filter(function (x) { return norm_(x.navn) === n; });
+    if (!treff.length) {
+      treff = fraNett.filter(function (x) { return norm_(x.navn).indexOf(n) === 0; });
+    }
+    const ider = [];
+    treff.forEach(function (x) { if (ider.indexOf(x.id) === -1) ider.push(x.id); });
+
+    if (!ider.length) { utenTreff.push(r.navn); return; }
+
+    const nyVerdi = ider.join(', ');
+    if (!r.ider.length) {
+      tab.sheet.getRange(r.rad, tab.idCol).setValue(nyVerdi);
+      fylt.push(r.navn + ' -> ' + nyVerdi);
+    } else if (r.ider.join(', ') !== nyVerdi) {
+      avvik.push(r.navn + ': arket har ' + r.ider.join(', ') + ', fotball.no sier ' + nyVerdi);
+    } else {
+      uendret.push(r.navn);
+    }
+  });
+
+  if (fylt.length)      { L.push('FYLT INN (' + fylt.length + ')'); fylt.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
+  if (avvik.length)     { L.push('AVVIK (' + avvik.length + ') — ikke overskrevet. Tøm cellen og kjør på nytt hvis du vil bytte.');
+                          avvik.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
+  if (utenTreff.length) { L.push('UTEN TREFF (' + utenTreff.length + ') — står laget oppført slik hos fotball.no?');
+                          utenTreff.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
+  if (uendret.length)   { L.push('Uendret: ' + uendret.length + ' lag hadde allerede riktig ID.'); }
+
+  if (!fylt.length && !avvik.length && !utenTreff.length) L.push('Ingenting å gjøre — tabellen er komplett.');
+
+  return L.join('\n');
+}
+
+/**
+ * Klubbens lag med fiksId, lest ut av lenkene på lagoversikten.
+ *
+ * Den skjøre delen av hele opplegget: dette er markup, ikke et grensesnitt, og
+ * fotball.no har ikke lovet oss at den ser lik ut i morgen. Derfor kastes det
+ * en feil med en gang null lenker blir funnet, i stedet for å returnere en tom
+ * liste som ville sett ut som "klubben har ingen lag".
+ */
+function klubbLagFraNett_(clubId) {
+  const url = 'https://www.fotball.no/fotballdata/klubb/hjem/?fiksId=' + clubId + '&underside=lag';
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  if (res.getResponseCode() !== 200) {
+    throw new Error('fotball.no svarte ' + res.getResponseCode() + ' på lagoversikten for klubb ' + clubId);
+  }
+
+  const html = res.getContentText('UTF-8');
+  const rx = /<a[^>]+href="[^"]*lag\/hjem\/\?fiksId=(\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  const ut = [], sett = {};
+  let m;
+  while ((m = rx.exec(html)) !== null) {
+    const navn = xlAvkod_(m[2]).replace(/\s+/g, ' ').trim();
+    if (!navn) continue;
+    const nokkel = m[1] + '|' + norm_(navn);
+    if (sett[nokkel]) continue;
+    sett[nokkel] = true;
+    ut.push({ navn: navn, id: m[1] });
+  }
+
+  if (!ut.length) {
+    throw new Error('Fant ingen laglenker på lagoversikten til klubb ' + clubId +
+      '. Siden kan ha endret oppbygning — oppslaget leser HTML, og det er den delen som ryker først.');
+  }
+  return ut;
 }
 
 /** Har fanen en "Turnering"-overskrift blant de øverste radene? */
@@ -253,6 +471,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('LFK kamper')
     .addItem('Kjør synk', 'menuApply')
     .addItem('Oppdater formatering', 'menuFormat')
+    .addItem('Hent Lag-ID', 'menuLagIder')
     .addToUi();
 }
 
@@ -286,6 +505,21 @@ function menuApply() {
            ].filter(Boolean).join('\n');
   });
   showText_('Synk fullført', lines.join('\n\n'));
+}
+
+/**
+ * Menyvalget. Feil vises i samme dialog som resultatet — et oppslag som leser
+ * andres HTML kommer til å feile en dag, og da skal du få vite hvorfor uten å
+ * lete i utførelsesloggen.
+ */
+function menuLagIder() {
+  let tekst;
+  try {
+    tekst = hentLagIder();
+  } catch (e) {
+    tekst = 'Gikk ikke:\n\n' + (e && e.message ? e.message : String(e));
+  }
+  showText_('Hent Lag-ID', tekst);
 }
 
 function menuFormat() {
@@ -463,6 +697,227 @@ function parseIcsDate_(v) {
   if (!m) return null;
   if (m[7] === 'Z') return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]));
   return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+// ---------------------------------------------------------------- RESULTAT -
+
+/**
+ * Resultatene for lagene i "Lag-ID", slått opp på samme nøkkel som alt annet:
+ * turnering pluss begge lagnavn. Ingenting lagres i arket for å få dette til —
+ * ingen kamp-ID, ingen radpeker. Nøkkelen regnes ut på nytt hver gang, og kan
+ * derfor ikke bli foreldet.
+ *
+ * Excel-eksporten skriver kortere lagnavn enn kalenderstrømmen ("Storhamar"
+ * mot "Storhamar  G15-1"), men canonKey_ visker ut nettopp den forskjellen —
+ * verifisert mot ekte navn fra begge kilder.
+ */
+function fetchResults_(settings) {
+  const out = { byKey: {}, rader: [], warnings: [], rowCount: 0, resultCount: 0,
+                teamIds: (settings && settings.teamIds) || [] };
+
+  if (!out.teamIds.length) {
+    out.warnings.push('Arket har en Resultat-kolonne, men ingen "Lag-ID" står i "' +
+      CONFIG.CONFIG_SHEET + '". Resultatene ble ikke hentet, og kolonnen er urørt. ' +
+      'Lag-ID er lagets fiksId på fotball.no — tallet i lenken til lagsiden.');
+    return out;
+  }
+
+  out.teamIds.forEach(function (id) {
+    let res;
+    try {
+      res = UrlFetchApp.fetch(resultsUrl_(id), { muteHttpExceptions: true, followRedirects: true });
+    } catch (e) {
+      out.warnings.push('Lag-ID ' + id + ': ' + e);
+      return;
+    }
+    if (res.getResponseCode() !== 200) {
+      out.warnings.push('Lag-ID ' + id + ': fotball.no svarte ' + res.getResponseCode());
+      return;
+    }
+
+    const tab = xlTabell_(res.getBlob());
+    if (!tab) {
+      out.warnings.push('Lag-ID ' + id + ': svaret var ikke et regneark.');
+      return;
+    }
+    if (!tab.rader.length) {
+      out.warnings.push('Lag-ID ' + id + ' ga 0 rader. Det betyr nesten alltid at ID-en ikke ' +
+        'er lagets fiksId — fotball.no svarer da 200 med et tomt ark i stedet for en feil.');
+      return;
+    }
+
+    const H = tab.overskrift;
+    const iH = H.indexOf('Hjemmelag'), iB = H.indexOf('Bortelag'),
+          iT = H.indexOf('Turnering'), iR = H.indexOf('Resultat'), iD = H.indexOf('Dato');
+    if (iH < 0 || iB < 0 || iT < 0 || iR < 0) {
+      out.warnings.push('Lag-ID ' + id + ': uventede kolonner i eksporten (' + H.join(', ') + ')');
+      return;
+    }
+
+    tab.rader.forEach(function (r) {
+      out.rowCount++;
+      if (!erKampresultat_(r[iR])) return;               // "-" = ikke spilt ennå
+      const res = String(r[iR]).replace(/\s+/g, ' ').trim();
+      out.byKey[matchKey_(r[iT], r[iH], r[iB])] = res;
+      // Radene tas vare på også, for reserveoppslaget på turnering + dato.
+      out.rader.push({ serie: String(r[iT]), home: String(r[iH]), away: String(r[iB]),
+                       dato: iD < 0 ? '' : xlDato_(r[iD]), resultat: res });
+      out.resultCount++;
+    });
+  });
+
+  return out;
+}
+
+/**
+ * Excel-serienummer til "dd.MM.yyyy". Epoke 30.12.1899. Regnet i UTC med
+ * getUTC-metodene, så resultatet ikke avhenger av tidssonen koden kjører i.
+ */
+function xlDato_(v) {
+  const n = Number(v);
+  if (!n || isNaN(n)) return String(v == null ? '' : v).trim();
+  const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000);
+  const p = function (x) { return (x < 10 ? '0' : '') + x; };
+  return p(d.getUTCDate()) + '.' + p(d.getUTCMonth() + 1) + '.' + d.getUTCFullYear();
+}
+
+/** Klubbdelen av et lagnavn: første ord, før mellomrom eller skråstrek. */
+function forsteOrd_(navn) {
+  return norm_(navn).split(/[\s/]+/)[0] || '';
+}
+
+/**
+ * Reserveoppslag for resultater, når lagnavnene ikke lar seg forene.
+ *
+ * Bakgrunnen: seniorlagene heter "Lillehammer Kvinner 2" i kalenderstrømmen og
+ * bare "Lillehammer 2" i Excel-eksporten. canonKey_ er bygget for aldersbestemte
+ * lag ("G15-2" -> "2") og har ingen regel for "Kvinner", så nøkkelen bommer.
+ *
+ * I stedet for å bygge ut navnereglene med gjetninger om hvordan hver
+ * seniorserie skriver seg — "Kvinner Senior A", "A-damer", "J19-1", "9er" — som
+ * ville vært en regel per særtilfelle, kobles raden på turnering + dato, med
+ * klubbnavnet på hver side som kontroll. Er det mer enn én kandidat, gjøres
+ * ingenting: en gjetning i feil retning ville skrevet feil resultat på en kamp.
+ */
+function resultatPaaDato_(results, row, brukt) {
+  const treff = [];
+  (results.rader || []).forEach(function (r, i) {
+    if (brukt[i]) return;
+    if (norm_(r.serie) !== norm_(row.serie)) return;
+    if (r.dato !== row.dato) return;
+    if (forsteOrd_(r.home) !== forsteOrd_(row.home)) return;
+    if (forsteOrd_(r.away) !== forsteOrd_(row.away)) return;
+    treff.push(i);
+  });
+  if (treff.length !== 1) return null;
+  brukt[treff[0]] = true;
+  return results.rader[treff[0]].resultat;
+}
+
+/**
+ * Et ekte resultat er sifre med strek mellom. Kamper som ikke er spilt har "-"
+ * i feltet, altså en utfylt celle — "det står noe der" duger ikke som test.
+ */
+function erKampresultat_(v) {
+  return /^\s*\d{1,2}\s*[-–]\s*\d{1,2}\s*$/.test(String(v == null ? '' : v));
+}
+
+/**
+ * Leser en xlsx-blob uten å lagre den noe sted. En xlsx er en zip med XML inni,
+ * og Utilities.unzip åpner den rett fra svaret — ingen midlertidig fil i Drive,
+ * intet bibliotek.
+ *
+ * Returnerer { overskrift, rader } eller null.
+ */
+function xlTabell_(blob) {
+  let filer;
+  try {
+    filer = Utilities.unzip(blob.setContentType('application/zip'));
+  } catch (e) {
+    return null;
+  }
+
+  const finn = function (frag) {
+    return filer.filter(function (f) { return f.getName().indexOf(frag) !== -1; })[0];
+  };
+
+  // Tekst ligger enten i sharedStrings.xml eller inline i cellene. Leser vi
+  // bare det ene og fila bruker det andre, ser arket tomt ut — og et tomt ark
+  // er nettopp signalet vi bruker på at noe er galt.
+  const ss = finn('sharedStrings.xml');
+  const delte = ss
+    ? (ss.getDataAsString('UTF-8').match(/<si>[\s\S]*?<\/si>/g) || []).map(function (si) {
+        return (si.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []).map(xlAvkod_).join('');
+      })
+    : [];
+
+  const ark = finn('sheet1.xml') || filer.filter(function (f) {
+    return /worksheets\/.*\.xml$/.test(f.getName());
+  })[0];
+  if (!ark) return null;
+
+  const rader = (ark.getDataAsString('UTF-8').match(/<row[\s\S]*?<\/row>/g) || [])
+    .map(function (r) { return xlCeller_(r, delte); });
+
+  // Et ark uten datarader er ikke det samme som et ødelagt svar, og de to må
+  // ikke ende i samme feilmelding: det tomme arket er det fotball.no sender
+  // når lag-ID-en er feil, og den diagnosen er verdt å få rett.
+  return { overskrift: rader[0] || [], rader: rader.slice(1) };
+}
+
+/** XML-tekst til lesbar streng. */
+function xlAvkod_(t) {
+  return String(t)
+    .replace(/<[^>]*>/g, '')
+    .replace(/&#(\d+);/g, function (_, d) { return String.fromCharCode(Number(d)); })
+    // Klubbsiden skriver hex-entiteter (&#xC5; for Å), ikke desimale.
+    .replace(/&#x([0-9a-fA-F]+);/g, function (_, h) { return String.fromCharCode(parseInt(h, 16)); })
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .trim();
+}
+
+/**
+ * Cellene i én <row>. Håndterer de tre formene xlsx bruker: t="s" (peker inn i
+ * sharedStrings), t="inlineStr" (tekst i cella) og tall uten t.
+ *
+ * Tomme celler er ofte utelatt helt fra XML-en, ikke bare tomme. Uten å lese
+ * kolonnebokstaven i r="C2" ville resten av raden forskjøvet seg, og
+ * Resultat-kolonnen kunne endt opp med å bli lest fra Bane.
+ */
+function xlCeller_(radXml, delte) {
+  const ut = [];
+  const rx = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+  let m;
+  while ((m = rx.exec(radXml)) !== null) {
+    const attr = m[1] || '';
+    const innhold = m[2] || '';
+    const type = (attr.match(/\bt="([^"]+)"/) || [])[1] || 'n';
+
+    let verdi;
+    if (type === 's') {
+      const i = Number(xlAvkod_((innhold.match(/<v>([\s\S]*?)<\/v>/) || [])[0] || ''));
+      verdi = delte[i] !== undefined ? delte[i] : '';
+    } else if (type === 'inlineStr') {
+      verdi = (innhold.match(/<t[^>]*>[\s\S]*?<\/t>/g) || []).map(xlAvkod_).join('');
+    } else {
+      verdi = xlAvkod_((innhold.match(/<v>([\s\S]*?)<\/v>/) || [])[0] || '');
+    }
+
+    const ref = (attr.match(/\br="([A-Z]+)\d+"/) || [])[1];
+    const idx = ref ? xlKolIndeks_(ref) : ut.length;
+    while (ut.length < idx) ut.push('');
+    ut[idx] = verdi;
+  }
+  return ut;
+}
+
+/** "A" -> 0, "B" -> 1, ... "AA" -> 26 */
+function xlKolIndeks_(bokstaver) {
+  let n = 0;
+  for (let i = 0; i < bokstaver.length; i++) n = n * 26 + (bokstaver.charCodeAt(i) - 64);
+  return n - 1;
 }
 
 // ---------------------------------------------------------------- REGNEARK -
@@ -696,6 +1151,12 @@ function buildPlan_(profile) {
   const t = locateTable_(settings);
   const fixtures = fetchFixtures_(settings);
 
+  // Resultater hentes bare hvis arket faktisk har kolonnen. Ingen kolonne,
+  // ingen nedlasting — da er dette et ark som ikke er interessert.
+  const wantResults = t.col['Resultat'] !== undefined;
+  const results = wantResults ? fetchResults_(settings)
+                              : { byKey: {}, warnings: [], resultCount: 0, teamIds: [] };
+
   const byKey = {};
   fixtures.forEach(function (f) { byKey[f.key] = f; });
 
@@ -751,32 +1212,62 @@ function buildPlan_(profile) {
     if (cands.length === 1) { taken[cands[0].key] = true; row.fixture = cands[0]; row.matchedOnDate = true; }
   });
 
+  let resultsWritten = 0, resultsOnDate = 0;
+  const brukteResultater = {};
+
   pending.forEach(function (row) {
     const f = row.fixture;
-    if (!f) {
-      if (isoOf_(row.dato) >= today) missingFromFeed.push({ row: row.rowNum, label: row.label });
-      return;
-    }
+    const changes = [];
 
-    const want = {
-      'Dato': f.dato, 'Dag': f.dag, 'Tid': f.tid, 'Bane': f.bane,
-      'Hjemmelag': f.homeLong, 'Bortelag': f.awayLong
+    // En formel er alltid noens bevisste valg — la den stå.
+    const laast = function (name) {
+      return t.formulas[row.idx] && t.formulas[row.idx][t.col[name]];
     };
 
-    if (norm_(row.home) !== norm_(f.homeLong)) nameChanges.push({ row: row.rowNum, from: row.home, to: f.homeLong });
-    if (norm_(row.away) !== norm_(f.awayLong)) nameChanges.push({ row: row.rowNum, from: row.away, to: f.awayLong });
+    if (f) {
+      const want = {
+        'Dato': f.dato, 'Dag': f.dag, 'Tid': f.tid, 'Bane': f.bane,
+        'Hjemmelag': f.homeLong, 'Bortelag': f.awayLong
+      };
 
-    const changes = [];
-    Object.keys(want).forEach(function (name) {
-      if (t.col[name] === undefined) return;
-      const nxt = want[name];
-      if (nxt === '' || nxt === null || nxt === undefined) return;
-      // En formel er alltid noens bevisste valg — la den stå.
-      if (t.formulas[row.idx] && t.formulas[row.idx][t.col[name]]) return;
-      const cur = fmtCell_(row.cells[t.col[name]], name);
-      if (norm_(cur) !== norm_(nxt)) changes.push({ column: name, from: cur, to: nxt });
-    });
-    if (changes.length) updates.push({ row: row.rowNum, key: f.key, label: row.label, changes: changes });
+      if (norm_(row.home) !== norm_(f.homeLong)) nameChanges.push({ row: row.rowNum, from: row.home, to: f.homeLong });
+      if (norm_(row.away) !== norm_(f.awayLong)) nameChanges.push({ row: row.rowNum, from: row.away, to: f.awayLong });
+
+      Object.keys(want).forEach(function (name) {
+        if (t.col[name] === undefined) return;
+        const nxt = want[name];
+        if (nxt === '' || nxt === null || nxt === undefined) return;
+        if (laast(name)) return;
+        const cur = fmtCell_(row.cells[t.col[name]], name);
+        if (norm_(cur) !== norm_(nxt)) changes.push({ column: name, from: cur, to: nxt });
+      });
+    } else if (isoOf_(row.dato) >= today) {
+      // Kamper som ligger fram i tid og ikke finnes i kalenderen er verdt et
+      // varsel. Spilte kamper er det ikke — de faller ut av strømmen av seg
+      // selv, og det er nettopp derfor resultatene må komme fra Excel.
+      missingFromFeed.push({ row: row.rowNum, label: row.label });
+    }
+
+    // Resultatet står på egne bein: en spilt kamp er borte fra kalenderen, så
+    // denne raden har ingen fixture å henge på. Derfor utenfor if (f).
+    if (wantResults && !laast('Resultat')) {
+      let res = results.byKey[row.key];
+      if (!res) {
+        res = resultatPaaDato_(results, row, brukteResultater);
+        if (res) resultsOnDate++;
+      }
+      if (res) {
+        const cur = fmtCell_(row.cells[t.col['Resultat']], 'Resultat');
+        if (norm_(cur) !== norm_(res)) {
+          changes.push({ column: 'Resultat', from: cur, to: res });
+          resultsWritten++;
+        }
+      }
+    }
+
+    if (changes.length) {
+      updates.push({ row: row.rowNum, key: f ? f.key : row.key, label: row.label, changes: changes });
+    }
   });
 
   fixtures.forEach(function (f) {
@@ -813,6 +1304,10 @@ function buildPlan_(profile) {
     additions: additions,
     nameChanges: nameChanges,
     missingFromFeed: missingFromFeed,
+    resultsWritten: resultsWritten,
+    resultsOnDate: resultsOnDate,
+    resultsAvailable: results.resultCount || 0,
+    resultWarnings: results.warnings || [],
     suspect: suspect,
     existingRows: existingRows,
     matchedRows: matchedRows,
@@ -847,7 +1342,7 @@ function filterPlan_(plan, only, exclude) {
 
 function applyPlan_(plan) {
   const t = locateTable_({ sheetName: plan.sheetName });
-  const warnings = [];
+  const warnings = (plan.resultWarnings || []).slice();
   let cellsWritten = 0;
 
   plan.updates.forEach(function (u) {
@@ -977,6 +1472,9 @@ function renderPlan_(plan) {
     L.push('');
   }
 
+  (plan.resultWarnings || []).forEach(function (w) { L.push('!! ' + w); });
+  if ((plan.resultWarnings || []).length) L.push('');
+
   if (plan.updates.length) {
     L.push('ENDRINGER (' + plan.updates.length + ')');
     plan.updates.forEach(function (u) {
@@ -1004,6 +1502,13 @@ function renderPlan_(plan) {
   if (plan.missingFromFeed.length) {
     L.push('IKKE I KALENDEREN (' + plan.missingFromFeed.length + ') — sjekk de som ligger fram i tid');
     plan.missingFromFeed.forEach(function (m) { L.push('rad ' + m.row + ' ' + m.label); });
+    L.push('');
+  }
+
+  if (plan.resultsWritten) {
+    L.push('RESULTATER (' + plan.resultsWritten + ' nye av ' + plan.resultsAvailable +
+           ' spilte kamper i eksporten)' +
+           (plan.resultsOnDate ? ' — ' + plan.resultsOnDate + ' av dem koblet på dato, ikke navn' : ''));
     L.push('');
   }
 

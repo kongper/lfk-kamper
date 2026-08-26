@@ -224,6 +224,18 @@ function finnLagTabell_() {
   };
 }
 
+/** Fjerner duplikater, med rekkefølgen i behold. */
+function uniq_(arr) {
+  const sett = {}, ut = [];
+  (arr || []).forEach(function (x) {
+    const n = norm_(x);
+    if (sett[n]) return;
+    sett[n] = true;
+    ut.push(x);
+  });
+  return ut;
+}
+
 /** "136204, 187246" -> ['136204','187246']. Alt som ikke er sifre forkastes. */
 function splitIder_(v) {
   return String(v == null ? '' : v).split(/[^0-9]+/).filter(function (s) { return s.length > 0; });
@@ -257,6 +269,43 @@ function teamIdsFor_(teams) {
 }
 
 /**
+ * Hvert lagnavn som forekommer noe sted: både "Lag" fra config og alle
+ * Hjemmelag/Bortelag i terminlistene. Motstanderne er med her — det er dem
+ * lenkene til kontaktpersoner skal peke på.
+ *
+ * Navnene tas ordrett slik de står i arket, altså fotball.no sin egen
+ * skrivemåte fra kalenderstrømmen. Det er den formen tabellen slås opp på.
+ */
+function alleLagNavn_(profiles) {
+  const sett = {}, ut = [];
+  const legg = function (navn) {
+    const n = String(navn || '').trim();
+    if (!n || sett[norm_(n)]) return;
+    sett[norm_(n)] = true;
+    ut.push(n);
+  };
+
+  profiles.forEach(function (p) { p.teams.forEach(legg); });
+
+  profiles.forEach(function (p) {
+    let t;
+    try {
+      t = locateTable_(p);
+    } catch (e) {
+      return;                      // fanen finnes ikke ennå — ikke noe å hente
+    }
+    t.rows.forEach(function (r) {
+      if (isBlank_(r)) return;
+      ['Hjemmelag', 'Bortelag'].forEach(function (kol) {
+        if (t.col[kol] !== undefined) legg(fmtCell_(r[t.col[kol]], kol));
+      });
+    });
+  });
+
+  return ut;
+}
+
+/**
  * Henter Lag-ID fra fotball.no og fyller ut tabellen i "system".
  *
  * Dette ER skraping: ID-en står ingen andre steder enn i lenkene på klubbens
@@ -285,12 +334,10 @@ function hentLagIder() {
   tab.rader.forEach(function (r) { finnes[norm_(r.navn)] = true; });
 
   const nye = [];
-  profiles.forEach(function (p) {
-    p.teams.forEach(function (navn) {
-      if (finnes[norm_(navn)]) return;
-      finnes[norm_(navn)] = true;
-      nye.push(navn);
-    });
+  alleLagNavn_(profiles).forEach(function (navn) {
+    if (finnes[norm_(navn)]) return;
+    finnes[norm_(navn)] = true;
+    nye.push(navn);
   });
   nye.forEach(function (navn, i) {
     const rad = tab.nesteRad + i;
@@ -309,13 +356,19 @@ function hentLagIder() {
   L.push('');
 
   // 3. Fyll tomme celler, rapporter resten.
-  const fylt = [], avvik = [], utenTreff = [], uendret = [];
+  const fylt = [], avvik = [], uendret = [];
+  let utenTreff = [];
 
   tab.rader.forEach(function (r) {
     const n = norm_(r.navn);
     let treff = fraNett.filter(function (x) { return norm_(x.navn) === n; });
     if (!treff.length) {
-      treff = fraNett.filter(function (x) { return norm_(x.navn).indexOf(n) === 0; });
+      // Prefikstreff bare når det er ett eneste. "Lillehammer G16" skal kunne
+      // finne "Lillehammer G16-1", men "Lillehammer" alene treffer hvert lag i
+      // klubben, og da ville raden fått en håndfull ID-er som ikke hører
+      // sammen. Heller ingen ID enn feil ID.
+      const pfx = fraNett.filter(function (x) { return norm_(x.navn).indexOf(n) === 0; });
+      if (pfx.length === 1) treff = pfx;
     }
     const ider = [];
     treff.forEach(function (x) { if (ider.indexOf(x.id) === -1) ider.push(x.id); });
@@ -325,6 +378,10 @@ function hentLagIder() {
     const nyVerdi = ider.join(', ');
     if (!r.ider.length) {
       tab.sheet.getRange(r.rad, tab.idCol).setValue(nyVerdi);
+      // Raden må huske ID-en sin med en gang: motstanderrunden under henter
+      // lagsider for våre lag, og uten dette ville den ikke sett laget vi nettopp
+      // fylte inn — første kjøring på et tomt ark ville gitt null motstandere.
+      r.ider = ider.slice();
       fylt.push(r.navn + ' -> ' + nyVerdi);
     } else if (r.ider.join(', ') !== nyVerdi) {
       avvik.push(r.navn + ': arket har ' + r.ider.join(', ') + ', fotball.no sier ' + nyVerdi);
@@ -333,16 +390,170 @@ function hentLagIder() {
     }
   });
 
+  // 4. Motstanderne. De hører til andre klubber, men står lenket på våre egne
+  //    lagsider — og der er ID-en. Bare rader som fortsatt er tomme røres.
+  const par = motstanderPar_(profiles);
+  const utenIdNaa = {};
+  tab.rader.forEach(function (r) { if (!r.ider.length) utenIdNaa[norm_(r.navn)] = r; });
+
+  const vaare = tab.rader.filter(function (r) {
+    return r.ider.length && profiles.some(function (p) {
+      return p.teams.some(function (pfx) { return norm_(r.navn).indexOf(norm_(pfx)) === 0; });
+    });
+  });
+
+  const fyltMotstander = [], tvetydige = [];
+  vaare.forEach(function (v) {
+    // Motstanderne dette laget faktisk møter, slik de står i arket.
+    const moter = uniq_(par[norm_(v.navn)] || []);
+    const trenger = moter.filter(function (navn) { return utenIdNaa[norm_(navn)]; });
+    if (!trenger.length) return;
+
+    let fraNettet;
+    try {
+      fraNettet = motstandereFraLagside_(v.ider[0]);
+    } catch (e) {
+      L.push('Klarte ikke lese lagsiden til ' + v.navn + ': ' + (e && e.message ? e.message : e));
+      return;
+    }
+
+    trenger.forEach(function (navn) {
+      const rad = utenIdNaa[norm_(navn)];
+      if (!rad || rad.ider.length) return;
+
+      // Kortform mot arkets lange form: samme nøkkel som resten av synken.
+      let kand = fraNettet.filter(function (x) { return canonKey_(x.navn) === canonKey_(navn); });
+      if (!kand.length) {
+        kand = fraNettet.filter(function (x) { return forsteOrd_(x.navn) === forsteOrd_(navn); });
+      }
+      if (kand.length !== 1) {
+        if (kand.length > 1) tvetydige.push(navn + ' (' + kand.length + ' kandidater hos ' + v.navn + ')');
+        return;
+      }
+
+      tab.sheet.getRange(rad.rad, tab.idCol).setValue(kand[0].id);
+      rad.ider = [kand[0].id];
+      fyltMotstander.push(navn + ' -> ' + kand[0].id + '  (fra ' + v.navn + ')');
+    });
+  });
+
+  if (fyltMotstander.length) {
+    L.push('MOTSTANDERE FYLT INN (' + fyltMotstander.length + ')');
+    fyltMotstander.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+  }
+  if (tvetydige.length) {
+    L.push('TVETYDIGE (' + tvetydige.length + ') — flere lag passet, ingen ble valgt');
+    tvetydige.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+  }
+
+  // Det som fortsatt står tomt etter motstanderrunden.
+  utenTreff = tab.rader.filter(function (r) { return !r.ider.length; })
+                       .map(function (r) { return r.navn; });
+
   if (fylt.length)      { L.push('FYLT INN (' + fylt.length + ')'); fylt.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
   if (avvik.length)     { L.push('AVVIK (' + avvik.length + ') — ikke overskrevet. Tøm cellen og kjør på nytt hvis du vil bytte.');
                           avvik.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
-  if (utenTreff.length) { L.push('UTEN TREFF (' + utenTreff.length + ') — står laget oppført slik hos fotball.no?');
-                          utenTreff.forEach(function (x) { L.push('  ' + x); }); L.push(''); }
+  if (utenTreff.length) {
+    L.push('UTEN ID (' + utenTreff.length + ') — radene står i tabellen med tom ID.');
+    L.push('  Motstanderlag hører til andre klubber og finnes ikke i vår lagoversikt.');
+    L.push('  Fyll inn ID-en for hånd der du vil ha lenke til kontaktpersoner.');
+    utenTreff.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+  }
   if (uendret.length)   { L.push('Uendret: ' + uendret.length + ' lag hadde allerede riktig ID.'); }
 
   if (!fylt.length && !avvik.length && !utenTreff.length) L.push('Ingenting å gjøre — tabellen er komplett.');
 
   return L.join('\n');
+}
+
+// ------------------------------------------------------------------ LENKER -
+
+const KONTAKT_URL = 'https://www.fotball.no/fotballdata/lag/hjem/?fiksId=%ID%&underside=kontaktpersoner';
+
+/** Første Lag-ID for et lagnavn, eller '' hvis vi ikke har noen. */
+function lagIdFor_(navn, kart) {
+  const ider = (kart || lagIdKart_())[norm_(navn)] || [];
+  return ider.length ? ider[0] : '';
+}
+
+/**
+ * Legger lenke til kontaktpersoner på motstanderne i terminlisten.
+ *
+ * "Motstander" er ethvert lagnavn som ikke treffer et av prefiksene i config —
+ * altså alle andre enn våre egne. Kontaktpersonene til vårt eget lag har vi
+ * ingen grunn til å slå opp.
+ *
+ * Utseendet: lenken får cellens EGEN tekstfarge og ingen understreking. Ikke
+ * hardkodet svart — radene kan være fargelagt fra config, og tvungen svart
+ * ville stukket mer ut enn det den erstattet. Cellen skal se ut nøyaktig som
+ * før, bare være klikkbar.
+ *
+ * Kjøres helt til slutt: et setValue på et lagnavn fjerner lenken, og
+ * formatkopieringen ville overskrevet tekststilen.
+ *
+ * Cellene skrives én og én, ikke kolonnevis. En setRichTextValues over hele
+ * kolonnen ville skrevet tilbake alle cellene — også de som inneholder en
+ * formel, og da ville formelen blitt gjort om til teksten sin. Etter første
+ * gjennomkjøring er det uansett ingenting å skrive.
+ */
+function applyTeamLinks_(t, profile) {
+  const kart = lagIdKart_();
+  const kolonner = ['Hjemmelag', 'Bortelag'].filter(function (k) { return t.col[k] !== undefined; });
+  if (!kolonner.length || !Object.keys(kart).length) return { linked: 0, missing: 0 };
+
+  const first = t.headerRow + 2;
+  const rowCount = t.sheet.getLastRow() - first + 1;
+  if (rowCount < 1) return { linked: 0, missing: 0 };
+
+  const vart = function (navn) {
+    const n = norm_(navn);
+    return profile.teams.some(function (pfx) { return n.indexOf(norm_(pfx)) === 0; });
+  };
+
+  let linked = 0;
+  const utenId = {};
+
+  kolonner.forEach(function (kol) {
+    const range = t.sheet.getRange(first, t.col[kol] + 1, rowCount, 1);
+    const verdier = range.getValues();
+    const formler = range.getFormulas();
+    const farger = range.getFontColors();
+    const naa = range.getRichTextValues();
+
+    verdier.forEach(function (rad, i) {
+      const navn = fmtCell_(rad[0], kol);
+      if (!navn || formler[i][0]) return;         // tom celle eller formel: ikke vår
+
+      const gjeldende = naa[i][0];
+      const gammelLenke = gjeldende && gjeldende.getLinkUrl ? gjeldende.getLinkUrl() : null;
+      const id = vart(navn) ? '' : lagIdFor_(navn, kart);
+
+      if (!id) {
+        if (!vart(navn)) utenId[navn] = true;
+        if (!gammelLenke) return;                 // allerede uten lenke
+        // ID-en er borte fra tabellen — da skal lenken bort herfra også.
+        t.sheet.getRange(first + i, t.col[kol] + 1)
+          .setRichTextValue(SpreadsheetApp.newRichTextValue().setText(navn).build());
+        return;
+      }
+
+      linked++;
+      const url = KONTAKT_URL.replace('%ID%', id);
+      if (gammelLenke === url && gjeldende.getText() === navn) return;   // står allerede riktig
+
+      const stil = SpreadsheetApp.newTextStyle()
+        .setForegroundColor(farger[i][0] || '#000000')
+        .setUnderline(false)
+        .build();
+      t.sheet.getRange(first + i, t.col[kol] + 1).setRichTextValue(
+        SpreadsheetApp.newRichTextValue().setText(navn).setLinkUrl(url).setTextStyle(stil).build());
+    });
+  });
+
+  return { linked: linked, missing: Object.keys(utenId).length };
 }
 
 /**
@@ -353,6 +564,71 @@ function hentLagIder() {
  * en feil med en gang null lenker blir funnet, i stedet for å returnere en tom
  * liste som ville sett ut som "klubben har ingen lag".
  */
+/**
+ * Lenker til lagsider på en fotball.no-side, som {navn, id}.
+ *
+ * <script>-blokkene fjernes først. Uten det plukker uttrykket opp taggene som
+ * ligger inni skriptene, og lagnavnet kommer ut som en linje med jQuery foran
+ * seg — noe som aldri matcher noe, men som fyller rapporten med søppel.
+ */
+function lagLenkerFraSide_(html, egetId) {
+  const naken = String(html).replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  const rx = /<a[^>]+href="[^"]*lag\/hjem\/\?fiksId=(\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+  const ut = [], sett = {};
+  let m;
+  while ((m = rx.exec(naken)) !== null) {
+    if (egetId && m[1] === String(egetId)) continue;
+    const navn = xlAvkod_(m[2]).replace(/\s+/g, ' ').trim();
+    if (!navn || sett[m[1]]) continue;
+    sett[m[1]] = true;
+    ut.push({ navn: navn, id: m[1] });
+  }
+  return ut;
+}
+
+/**
+ * Motstanderne til ett av våre lag, med ID, lest fra lagets egen side.
+ *
+ * Bekreftet 21.08.2026: lagsiden lister hver motstander laget møter, med lenke
+ * til lagsiden deres. Det er derfor ID-ene kan hentes uten å gå veien om
+ * turneringene — ett kall per lag vi følger.
+ *
+ * Navnene her er kortformen ("Stange", "Follebu Gausdal"), ikke arkets
+ * ("Stange  G15-1"). Sammenlikningen må derfor gå gjennom canonKey_.
+ */
+function motstandereFraLagside_(teamId) {
+  const url = 'https://www.fotball.no/fotballdata/lag/hjem/?fiksId=' + teamId;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  if (res.getResponseCode() !== 200) {
+    throw new Error('fotball.no svarte ' + res.getResponseCode() + ' på lagsiden til ' + teamId);
+  }
+  return lagLenkerFraSide_(res.getContentText('UTF-8'), teamId);
+}
+
+/**
+ * Hvem møter hvem: for hvert av lagnavnene i terminlistene, motstanderne som
+ * står på samme rad. Brukes til å koble en ID fra ett av VÅRE lags sider til
+ * riktig rad — "Ottestad" fra G15-siden er et annet lag enn "Ottestad" fra
+ * G16-siden, og uten den innsnevringen ville de to blitt blandet.
+ */
+function motstanderPar_(profiles) {
+  const par = {};
+  profiles.forEach(function (p) {
+    let t;
+    try { t = locateTable_(p); } catch (e) { return; }
+    t.rows.forEach(function (r) {
+      if (isBlank_(r)) return;
+      if (t.col['Hjemmelag'] === undefined || t.col['Bortelag'] === undefined) return;
+      const h = fmtCell_(r[t.col['Hjemmelag']], 'Hjemmelag');
+      const b = fmtCell_(r[t.col['Bortelag']], 'Bortelag');
+      if (!h || !b) return;
+      (par[norm_(h)] = par[norm_(h)] || []).push(b);
+      (par[norm_(b)] = par[norm_(b)] || []).push(h);
+    });
+  });
+  return par;
+}
+
 function klubbLagFraNett_(clubId) {
   const url = 'https://www.fotball.no/fotballdata/klubb/hjem/?fiksId=' + clubId + '&underside=lag';
   const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
@@ -360,18 +636,7 @@ function klubbLagFraNett_(clubId) {
     throw new Error('fotball.no svarte ' + res.getResponseCode() + ' på lagoversikten for klubb ' + clubId);
   }
 
-  const html = res.getContentText('UTF-8');
-  const rx = /<a[^>]+href="[^"]*lag\/hjem\/\?fiksId=(\d+)[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
-  const ut = [], sett = {};
-  let m;
-  while ((m = rx.exec(html)) !== null) {
-    const navn = xlAvkod_(m[2]).replace(/\s+/g, ' ').trim();
-    if (!navn) continue;
-    const nokkel = m[1] + '|' + norm_(navn);
-    if (sett[nokkel]) continue;
-    sett[nokkel] = true;
-    ut.push({ navn: navn, id: m[1] });
-  }
+  const ut = lagLenkerFraSide_(res.getContentText('UTF-8'), null);
 
   if (!ut.length) {
     throw new Error('Fant ingen laglenker på lagoversikten til klubb ' + clubId +
@@ -525,11 +790,16 @@ function menuLagIder() {
 function menuFormat() {
   const lines = loadProfiles_().map(function (prof) {
     const res = applyRowFormats_(locateTable_(prof), prof);
+    const lenker = applyTeamLinks_(locateTable_(prof), prof);
+    const halen = lenker.linked || lenker.missing
+      ? '\n  ' + lenker.linked + ' motstandere lenket til kontaktpersoner' +
+        (lenker.missing ? ', ' + lenker.missing + ' uten Lag-ID i "' + CONFIG.SYSTEM_SHEET + '"' : '')
+      : '';
     return prof.sheetName + ': ' + (res.teams
       ? res.formatted + ' rader formatert etter ' + res.teams + ' lag (' + res.mode + ')'
       : res.mode === 'markerte'
         ? 'ingen Lag-celler er markert — sett "Formater rader" til "alle" hvis du bare har ramme'
-        : 'formatering er slått av ("Formater rader" = nei)');
+        : 'formatering er slått av ("Formater rader" = nei)') + halen;
   });
   showText_('Oppdater formatering', lines.join('\n') + '\n\n' +
     'Formatet hentes fra Lag-cellene i arket "' + CONFIG.CONFIG_SHEET + '".\n' +
@@ -1389,8 +1659,14 @@ function applyPlan_(plan) {
   const format = prof ? applyRowFormats_(locateTable_({ sheetName: plan.sheetName }), prof)
                       : { formatted: 0, teams: 0 };
 
+  // Aller sist: lenkene. Både skrivingen over og formatkopieringen ville
+  // fjernet dem, så de må legges på etter begge deler.
+  const links = prof ? applyTeamLinks_(locateTable_({ sheetName: plan.sheetName }), prof)
+                     : { linked: 0, missing: 0 };
+
   return {
     cellsWritten: cellsWritten,
+    links: links,
     rowsUpdated: plan.updates.length,
     rowsAdded: rowsAdded,
     additionsHeld: additionsHeld,

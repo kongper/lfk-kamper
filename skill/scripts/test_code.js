@@ -195,6 +195,17 @@ const sandbox = {
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
   UrlFetchApp: {
     fetch: (url) => {
+      if (/lag\/hjem\/\?fiksId=(\d+)$/.test(url)) {
+        const id = url.match(/fiksId=(\d+)$/)[1];
+        const lag = (sandbox.LAGSIDER || {})[id] || [];
+        // Ekte svar har lenkene også inne i <script>-blokker. De skal ikke
+        // bli til lagnavn.
+        const soppel = lag.map(([n, i]) =>
+          `<script>$('#x').on('error', function() {}); ` +
+          `<a href="/fotballdata/lag/hjem/?fiksId=${i}">${n}</a></script>`).join('');
+        return { getResponseCode: () => (sandbox.LAGSIDE_CODE || {})[id] || 200,
+                 getContentText: () => soppel + klubbHtml(lag) };
+      }
       if (/klubb\/hjem/.test(url)) {
         return { getResponseCode: () => sandbox.KLUBB_CODE || 200,
                  getContentText: () => klubbHtml(sandbox.KLUBB_TOM ? [] : KLUBB_LAG) };
@@ -227,6 +238,20 @@ const sandbox = {
   },
   SpreadsheetApp: {
     getUi: () => ({ createMenu: () => ({ addItem() { return this; }, addToUi() {} }) }),
+    newTextStyle: () => {
+      const o = {};
+      return { setForegroundColor(c) { o.fg = c; return this; },
+               setUnderline(u) { o.underline = u; return this; },
+               build: () => o };
+    },
+    newRichTextValue: () => {
+      const o = { text: '', url: null, style: null };
+      return { setText(t) { o.text = t; return this; },
+               setLinkUrl(u) { o.url = u; return this; },
+               setTextStyle(s) { o.style = s; return this; },
+               build: () => ({ getText: () => o.text, getLinkUrl: () => o.url,
+                               getTextStyle: () => o.style }) };
+    },
     getActiveSpreadsheet: () => ({
       getNumSheets: () => 2,
       insertSheet: () => { throw new Error('config sheet already exists in this harness'); },
@@ -282,8 +307,24 @@ const MAIN = {
             Array.from({ length: nc || 1 }, (_, ci) =>
               (sandbox.FORMULAS_ON && (c - 1 + ci) === (sandbox.FORMULA_COL === undefined ? C['Tid'] : sandbox.FORMULA_COL)) ? '=X2' : '')),
           sort: (spec) => { sandbox.SORTED = spec; },
+          getFontColors: () => grid(nr, nc, (sandbox.FONT_COLOR || '#000000')),
+          getRichTextValues: () => Array.from({ length: nr || 1 }, (_, ri) =>
+            Array.from({ length: nc || 1 }, (_, ci) => {
+              const lagret = RICH[(r + ri) + ',' + (c + ci)];
+              return lagret || { getText: () => String((sheetValues[r - 1 + ri] || [])[c - 1 + ci] || ''),
+                                 getLinkUrl: () => null, getTextStyle: () => null };
+            })),
+          setRichTextValue: v => {
+            RICH[r + ',' + c] = v;
+            RICH_WRITES.push({ row: r, col: c, text: v.getText(), url: v.getLinkUrl(),
+                               style: v.getTextStyle() });
+          },
+          setRichTextValues: vs => vs.forEach((rad, ri) => rad.forEach((v, ci) => {
+            RICH[(r + ri) + ',' + (c + ci)] = v;
+            RICH_WRITES.push({ row: r + ri, col: c + ci, text: v.getText(), url: v.getLinkUrl(),
+                               style: v.getTextStyle() });
+          })),
           getBackgrounds: () => grid(nr, nc, '#ffffff'),
-          getFontColors:  () => grid(nr, nc, '#000000'),
           getFontWeights: () => grid(nr, nc, 'normal'),
           getFontStyles:  () => grid(nr, nc, 'normal'),
           getFontLines:   () => grid(nr, nc, 'none'),
@@ -302,6 +343,8 @@ const MAIN = {
 const grid = (r, c, v) => Array.from({ length: r || 1 }, () => Array.from({ length: c || 1 }, () => v));
 const FMT = {};
 const CONFIG_WRITES = [];
+let RICH = {};
+let RICH_WRITES = [];
 
 // Arket "system", slik Per har satt det opp: verdilistene til nedtrekkene
 // øverst, og Lag/Lag-ID-tabellen lenger ned. At tabellen IKKE starter i A1 er
@@ -914,6 +957,22 @@ sandbox.resultatPaaDato_(kvinneRader, kvinneRad, brukt);
 check('en eksportrad brukes bare én gang',
   sandbox.resultatPaaDato_(kvinneRader, kvinneRad, brukt), null);
 
+console.log('\n--- motstandere fra vår egen lagside ---');
+// Kortnavn, slik lagsiden skriver dem — arket har "Nordstrand", "Hasle-Løren".
+sandbox.LAGSIDER = {
+  '139037': [['Nordstrand', '208807'], ['Hasle-Løren', '112233'], ['Grorud', '445566']]
+};
+check('script-blokker gir ikke falske lagnavn',
+  sandbox.motstandereFraLagside_('139037').map(x => x.navn),
+  ['Nordstrand', 'Hasle-Løren', 'Grorud']);
+check('vårt eget lag utelates fra sin egen side',
+  sandbox.motstandereFraLagside_('139037').some(x => x.id === '139037'), false);
+
+const par = sandbox.motstanderPar_(sandbox.loadProfiles_());
+check('hvem møter hvem leses ut av arket',
+  (par['lillehammer'] || []).indexOf('Nordstrand') !== -1, true);
+check('og begge veier', (par['nordstrand'] || []).indexOf('Lillehammer') !== -1, true);
+
 console.log('\n--- lagIdKart_ / teamIdsFor_ ---');
 SYSTEM_ROWS = systemOppsett();
 SYSTEM_ROWS[11][1] = '136204, 187246';
@@ -949,12 +1008,87 @@ check('tom celle fylles', raden('Lillehammer G15-2')[1], '155261');
 check('to registreringer havner i samme celle', raden('Lillehammer G15-1')[1], '136204, 187246');
 check('en celle som allerede har verdi overskrives ikke', raden('Lillehammer G16-1')[1], '999999');
 check('avviket rapporteres i stedet', /999999.*139037/.test(rapport), true);
-check('lag uten treff hos fotball.no sies fra om', /UTEN TREFF[\s\S]*Lillehammer G16-2/.test(rapport), true);
-check('ingen rader forsvant, og den nye kom til',
+check('lag uten treff hos fotball.no sies fra om', /UTEN ID[\s\S]*Lillehammer G16-2/.test(rapport), true);
+check('et navn som treffer flere lag får ingen ID — heller tom enn feil',
+  (SYSTEM_ROWS.find(r => r[0] === 'Lillehammer') || [])[1] || '', '');
+check('ingen rader forsvant, og motstanderne fra arket kom til',
   SYSTEM_ROWS.filter(r => /^Lillehammer/.test(r[0] || '')).map(r => r[0]),
-  ['Lillehammer G15-1', 'Lillehammer G15-2', 'Lillehammer G16-1', 'Lillehammer G16-2']);
+  ['Lillehammer G15-1', 'Lillehammer G15-2', 'Lillehammer G16-1', 'Lillehammer G16-2',
+   'Lillehammer', 'Lillehammer 2']);
+check('og motstanderlagene står der, klare for en ID',
+  SYSTEM_ROWS.some(r => r[0] === 'Nordstrand'), true);
 check('verdilistene øverst er urørt', [SYSTEM_ROWS[0][0], SYSTEM_ROWS[3][1]], ['Sorter etter dato', 'Nei']);
 check('hex-entiteter i lagnavn dekodes', sandbox.klubbLagFraNett_('1683')[4].navn, 'Lillehammer G10 N. Ål - 1');
+
+// Motstanderrunden: ID-ene hentes fra våre egne lagsider.
+// Config peker på lagene slik de står i arket, som er det som gjelder ute.
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683'],
+  ['Lag', 'Lillehammer'], ['Lag', 'Lillehammer 2'],
+  ['Varsle e-post', 'din@epost.no']
+];
+SYSTEM_ROWS = systemOppsett().slice(0, 11).concat([
+  ['Lag', 'Lag-ID'],
+  ['Lillehammer', '136204'],
+  ['Lillehammer 2', '148115']
+]);
+KLUBB_LAG = [['Lillehammer G15-1', '136204'], ['Lillehammer G16-2', '148115']];
+sandbox.LAGSIDER = {
+  '136204': [['Nordstrand', '208807'], ['Hasle-Løren', '112233']],
+  '148115': []
+};
+const rapportM = sandbox.hentLagIder();
+const idFor = navn => ((SYSTEM_ROWS.find(r => r[0] === navn) || [])[1] || '');
+check('motstander fra arket fikk ID fra vår lagside', idFor('Nordstrand'), '208807');
+check('og den andre også', idFor('Hasle-Løren'), '112233');
+check('rapporten sier hvor ID-en kom fra',
+  /MOTSTANDERE FYLT INN[\s\S]*Nordstrand -> 208807/.test(rapportM), true);
+check('en motstander ingen av sidene nevner står fortsatt tom', idFor('Grorud'), '');
+check('kortnavn på nettet mot langnavn i arket går i hop',
+  idFor('Øystre Slidre/Rogne/Vang'), '');   // ikke nevnt på noen lagside ennå
+
+// Samme klubb i to aldersgrupper: ID-en skal komme fra det laget som faktisk
+// møter dem, ikke fra det andre.
+SYSTEM_ROWS = systemOppsett().slice(0, 11).concat([
+  ['Lag', 'Lag-ID'],
+  ['Lillehammer', '136204'],
+  ['Lillehammer 2', '148115']
+]);
+sandbox.LAGSIDER = { '136204': [['Ottestad', '900001']], '148115': [['Ottestad', '900002']] };
+sandbox.hentLagIder();
+check('ID-en kommer fra et lag som faktisk møter dem',
+  ['900001', '900002'].indexOf(idFor('Ottestad')) !== -1, true);
+
+// Et lag ingen av våre møter, får ingen ID selv om navnet finnes på nettet.
+SYSTEM_ROWS = systemOppsett().slice(0, 11).concat([
+  ['Lag', 'Lag-ID'],
+  ['Lillehammer', '136204']
+]);
+sandbox.LAGSIDER = { '136204': [['Vålerenga', '777777']] };
+sandbox.hentLagIder();
+check('et lag vi ikke møter får ingen ID', idFor('Vålerenga'), '');
+
+// Tilbake til oppsettet de neste testene venter seg.
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683'],
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2'],
+  ['Varsle e-post', 'din@epost.no']
+];
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[13][1] = '999999';
+SYSTEM_ROWS.splice(14, 1);
+KLUBB_LAG = [
+  ['Lillehammer G15-1', '136204'],
+  ['Lillehammer G15-1', '187246'],
+  ['Lillehammer G15-2', '155261'],
+  ['Lillehammer G16-1', '139037'],
+  ['Lillehammer G10 N. &#xC5;l - 1', '143573']
+];
+sandbox.LAGSIDER = {};
+sandbox.hentLagIder();
 
 // Kjør en gang til: nå skal ingenting skrives, og det skal fortelles.
 const rapport2 = sandbox.hentLagIder();
@@ -973,6 +1107,80 @@ skrapefeil = '';
 try { sandbox.hentLagIder(); } catch (e) { skrapefeil = String(e.message || e); }
 check('en 503 sier hva som svarte hva', /503/.test(skrapefeil), true);
 sandbox.KLUBB_CODE = 0;
+
+// ---- lenker til kontaktpersoner --------------------------------------------
+
+console.log('\n--- alleLagNavn_ ---');
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683'],
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2'],
+  ['Varsle e-post', 'din@epost.no']
+];
+const alleNavn = sandbox.alleLagNavn_(sandbox.loadProfiles_());
+check('våre egne lag er med', alleNavn.indexOf('Lillehammer G16-2') !== -1, true);
+check('motstanderne i arket er med også', alleNavn.indexOf('Nordstrand') !== -1, true);
+check('og de med lange navn', alleNavn.indexOf('Øystre Slidre/Rogne/Vang') !== -1, true);
+check('hvert navn bare én gang',
+  alleNavn.length, new Set(alleNavn.map(n => n.toLowerCase())).size);
+
+console.log('\n--- applyTeamLinks_ ---');
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS.push(['Nordstrand', '208807']);
+SYSTEM_ROWS.push(['Hasle-Løren', '112233']);
+SYSTEM_ROWS[11][1] = '136204';                       // vårt eget G15-1
+RICH = {}; RICH_WRITES = [];
+
+const prof0 = sandbox.loadProfiles_()[0];
+const lenker = sandbox.applyTeamLinks_(sandbox.locateTable_(prof0), prof0);
+check('tre celler lenket — Hasle-Løren står to ganger i arket', lenker.linked, 3);
+check('og de er de riktige tre',
+  RICH_WRITES.map(w => w.text).sort(), ['Hasle-Løren', 'Hasle-Løren', 'Nordstrand']);
+
+const nordstrand = RICH_WRITES.find(w => w.text === 'Nordstrand');
+check('lenken peker på kontaktpersoner', nordstrand.url,
+  'https://www.fotball.no/fotballdata/lag/hjem/?fiksId=208807&underside=kontaktpersoner');
+check('teksten er lagnavnet, uendret', nordstrand.text, 'Nordstrand');
+check('ingen understreking', nordstrand.style.underline, false);
+check('og cellens egen tekstfarge beholdes', nordstrand.style.fg, '#000000');
+
+check('våre egne lag lenkes ikke',
+  RICH_WRITES.some(w => /^Lillehammer/.test(w.text)), false);
+check('motstandere uten ID lenkes ikke',
+  RICH_WRITES.some(w => w.text === 'Grorud'), false);
+check('men de telles, så du vet hvor mange som mangler', lenker.missing > 0, true);
+
+// Farget rad: lenken skal ta radens farge, ikke tvinge svart.
+sandbox.FONT_COLOR = '#274e13';
+RICH = {}; RICH_WRITES = [];
+sandbox.applyTeamLinks_(sandbox.locateTable_(prof0), prof0);
+check('lenken arver radens tekstfarge',
+  RICH_WRITES.find(w => w.text === 'Nordstrand').style.fg, '#274e13');
+sandbox.FONT_COLOR = null;
+
+// Kjør på nytt uten endringer: ingenting skal skrives.
+RICH_WRITES = [];
+sandbox.applyTeamLinks_(sandbox.locateTable_(prof0), prof0);
+check('uendrede lenker skrives ikke på nytt', RICH_WRITES.length, 0);
+
+// Fjernes ID-en, skal lenken bort igjen.
+SYSTEM_ROWS = SYSTEM_ROWS.filter(r => r[0] !== 'Nordstrand');
+RICH_WRITES = [];
+sandbox.applyTeamLinks_(sandbox.locateTable_(prof0), prof0);
+const fjernet = RICH_WRITES.find(w => w.text === 'Nordstrand');
+check('tom ID fjerner lenken', fjernet && fjernet.url, null);
+
+// Formelvern gjelder her også.
+SYSTEM_ROWS.push(['Nordstrand', '208807']);
+RICH = {}; RICH_WRITES = [];
+sandbox.FORMULAS_ON = true;
+sandbox.FORMULA_COL = C['Hjemmelag'];
+sandbox.applyTeamLinks_(sandbox.locateTable_(prof0), prof0);
+check('en formel i lagnavn-cellen røres ikke',
+  RICH_WRITES.some(w => w.col === C['Hjemmelag'] + 1), false);
+sandbox.FORMULAS_ON = false;
+sandbox.FORMULA_COL = undefined;
 
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

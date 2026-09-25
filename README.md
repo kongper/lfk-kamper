@@ -149,6 +149,16 @@ nightly mail, so different squads can go to different people.
 `Klubb-ID` is the `fiksId` in your club's fotball.no URL:
 `fotball.no/fotballdata/klubb/hjem/?fiksId=1683`.
 
+`Klubb-ID` may name several clubs, comma-separated (`1683, 1234`) or on
+separate rows. Each club's calendar is fetched and merged; a match between two
+of the clubs appears once. `Lag` filters across all of them.
+
+The `system` tab's `Lag | Lag-ID` table has an optional `Klubb-ID` column to
+the right. *Hent Lag-ID* adds the header if the column is free, fills our own
+teams from the club they were listed under, and reads opponents' clubs from
+their team page (left blank if that page names more than one club). As with
+`Lag-ID`, a filled cell is never overwritten — mismatches are reported.
+
 Fixture tabs can be called anything — the column header is what points at them.
 A header naming a tab that does not exist fails immediately and lists the tabs
 that do, rather than writing somewhere unexpected.

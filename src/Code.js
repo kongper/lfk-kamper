@@ -118,6 +118,11 @@ const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag'
  * som spiller en serie dette arket ikke følger. Skriv så mye av navnet som
  * skal til for å treffe det du vil ha, og ikke mer.
  *
+ * "Klubb-ID" kan være flere klubber: kommaseparert i én celle ("1683, 1234"),
+ * eller på hver sin rad slik som "Lag". Kalenderen hentes for hver klubb og
+ * slås sammen, og en kamp mellom to av klubbene kommer bare med én gang.
+ * "Lag" filtrerer på tvers av alle klubbene i kolonnen.
+ *
  * Poenget med å styre på lag i stedet for på serienavn: et lag beholder navnet
  * gjennom sesongen, mens serienavnene bytter hver gang laget rykker opp et
  * årstrinn. Nye serier og cupkamper for de samme lagene kommer med av seg selv.
@@ -168,9 +173,18 @@ function buildProfile_(sheetName, raw) {
     throw new Error('Ingen "Lag" satt opp for kolonnen "' + (sheetName || 'Verdi') +
                     '" i arket "' + CONFIG.CONFIG_SHEET + '"');
   }
+  // Alle sifre i alle Klubb-ID-cellene: komma, mellomrom og flere rader går
+  // like godt. Samme lesing som Lag-ID i "system".
+  let clubIds = [];
+  (pick('Klubb-ID') || []).forEach(function (v) {
+    splitIder_(v).forEach(function (id) { if (clubIds.indexOf(id) === -1) clubIds.push(id); });
+  });
+  if (!clubIds.length) clubIds = ['1683'];
+
   return {
     sheetName: sheetName || (pick('Ark') || [''])[0],
-    clubId: (pick('Klubb-ID') || ['1683'])[0],
+    clubIds: clubIds,
+    clubId: clubIds[0],                // første klubb, for kode som bare trenger én
     teams: teams,
     // Lag-ID står i arket "system", ikke her — ett sted, slått opp på lagnavn.
     teamIds: teamIdsFor_(teams),
@@ -206,6 +220,16 @@ function finnLagTabell_() {
   }
   if (hRow === -1) return null;
 
+  // Klubb-ID er valgfri og står til høyre for Lag-ID, i samme overskriftsrad.
+  // Letingen stopper ved første tomme overskrift, så den ikke finner en
+  // "Klubb-ID" som hører til en annen tabell lenger ut i arket.
+  let klubbCol = -1;
+  for (var k = lagCol + 2; k < values[hRow].length; k++) {
+    const h = norm_(values[hRow][k]);
+    if (!h) break;
+    if (h === 'klubb-id') { klubbCol = k; break; }
+  }
+
   // Hull i lista hoppes over i stedet for å avslutte den — en luftrad midt i
   // tabellen skal ikke gjøre lagene under usynlige.
   const rader = [];
@@ -214,11 +238,14 @@ function finnLagTabell_() {
     const navn = String(values[i][lagCol] || '').trim();
     if (!navn) continue;
     sisteMedNavn = i;
-    rader.push({ navn: navn, ider: splitIder_(values[i][lagCol + 1]), rad: i + 1 });
+    rader.push({ navn: navn, ider: splitIder_(values[i][lagCol + 1]), rad: i + 1,
+                 klubb: klubbCol === -1 ? [] : splitIder_(values[i][klubbCol]) });
   }
 
   return {
     sheet: sheet, lagCol: lagCol + 1, idCol: lagCol + 2, rader: rader,
+    headerRow: hRow + 1, values: values,
+    klubbCol: klubbCol === -1 ? 0 : klubbCol + 1,
     nesteRad: Math.max(sisteMedNavn + 2, hRow + 2),
     brukteRader: values.length
   };
@@ -342,16 +369,20 @@ function hentLagIder() {
   nye.forEach(function (navn, i) {
     const rad = tab.nesteRad + i;
     tab.sheet.getRange(rad, tab.lagCol).setValue(navn);
-    tab.rader.push({ navn: navn, ider: [], rad: rad });
+    tab.rader.push({ navn: navn, ider: [], rad: rad, klubb: [] });
   });
   if (nye.length) L.push('Nye lag lagt til: ' + nye.join(', '));
 
   // 2. Klubbens lagliste fra nett, én gang per klubb-ID.
   const klubber = [];
-  profiles.forEach(function (p) { if (klubber.indexOf(p.clubId) === -1) klubber.push(p.clubId); });
+  profiles.forEach(function (p) {
+    p.clubIds.forEach(function (id) { if (klubber.indexOf(id) === -1) klubber.push(id); });
+  });
 
   const fraNett = [];
-  klubber.forEach(function (id) { klubbLagFraNett_(id).forEach(function (x) { fraNett.push(x); }); });
+  klubber.forEach(function (id) {
+    klubbLagFraNett_(id).forEach(function (x) { x.klubb = id; fraNett.push(x); });
+  });
   L.push('Leste ' + fraNett.length + ' lag fra fotball.no.');
   L.push('');
 
@@ -372,6 +403,9 @@ function hentLagIder() {
     }
     const ider = [];
     treff.forEach(function (x) { if (ider.indexOf(x.id) === -1) ider.push(x.id); });
+    // Klubben laget ble funnet under. Brukes av Klubb-ID-runden lenger ned.
+    r.klubbFraNett = [];
+    treff.forEach(function (x) { if (r.klubbFraNett.indexOf(x.klubb) === -1) r.klubbFraNett.push(x.klubb); });
 
     if (!ider.length) { utenTreff.push(r.navn); return; }
 
@@ -464,9 +498,119 @@ function hentLagIder() {
   }
   if (uendret.length)   { L.push('Uendret: ' + uendret.length + ' lag hadde allerede riktig ID.'); }
 
-  if (!fylt.length && !avvik.length && !utenTreff.length) L.push('Ingenting å gjøre — tabellen er komplett.');
+  // 5. Klubb-ID, i sin egen kolonne til høyre for Lag-ID.
+  const kl = fyllKlubbIder_(tab);
+  kl.linjer.forEach(function (x) { L.push(x); });
+
+  if (!fylt.length && !avvik.length && !utenTreff.length && !kl.endret) {
+    L.push('Ingenting å gjøre — tabellen er komplett.');
+  }
 
   return L.join('\n');
+}
+
+/**
+ * Fyller kolonnen "Klubb-ID" i Lag-tabellen. Samme regler som for Lag-ID:
+ * tomme celler fylles, en celle med verdi røres aldri, og avvik rapporteres.
+ *
+ * Våre egne lag har klubben sin fra lagoversikten de ble funnet på — den er
+ * sikker. Motstanderne hører til andre klubber, og for dem leses klubblenken
+ * på lagets egen side. Gir siden mer enn én klubb, velges ingen: heller tom
+ * enn feil. Lagsiden hentes bare for rader som har Lag-ID og mangler Klubb-ID,
+ * så etter første kjøring koster dette ingenting.
+ *
+ * Mangler kolonnen, legges overskriften til rett til høyre for Lag-ID — men
+ * bare hvis den cellen og cellene under den er tomme. Ligger det noe der,
+ * sier vi fra i stedet for å skrive over det.
+ */
+function fyllKlubbIder_(tab) {
+  const L = [];
+  let endret = 0;
+
+  if (!tab.klubbCol) {
+    const kol = tab.idCol + 1;                       // 1-basert, rett til høyre
+    const opptatt = tab.values.slice(tab.headerRow - 1).some(function (rad) {
+      return String(rad[kol - 1] == null ? '' : rad[kol - 1]).trim() !== '';
+    });
+    if (opptatt) {
+      L.push('KLUBB-ID: kolonnen til høyre for Lag-ID er i bruk. Sett overskriften "Klubb-ID" ' +
+             'i en ledig kolonne ved siden av tabellen, så fylles den ved neste kjøring.');
+      return { linjer: L, endret: 0 };
+    }
+    tab.sheet.getRange(tab.headerRow, kol).setValue('Klubb-ID');
+    tab.klubbCol = kol;
+    L.push('La til kolonnen Klubb-ID i "' + CONFIG.SYSTEM_SHEET + '".');
+    endret++;
+  }
+
+  const fylt = [], avvik = [], ukjent = [];
+  tab.rader.forEach(function (r) {
+    if (!r.ider.length) return;                       // uten Lag-ID er det ingenting å slå opp
+
+    let klubb = (r.klubbFraNett || []).slice();
+    let kilde = 'lagoversikten';
+    if (!klubb.length && !r.klubb.length) {
+      try {
+        klubb = klubbFraLagside_(r.ider[0]);
+        kilde = 'lagsiden';
+      } catch (e) {
+        ukjent.push(r.navn + ' (' + (e && e.message ? e.message : e) + ')');
+        return;
+      }
+      if (klubb.length !== 1) {
+        ukjent.push(r.navn + (klubb.length ? ' (' + klubb.length + ' klubber på lagsiden)' : ''));
+        return;
+      }
+    }
+    if (!klubb.length) return;                        // har verdi, og vi vet ikke bedre
+
+    const nyVerdi = klubb.join(', ');
+    if (!r.klubb.length) {
+      tab.sheet.getRange(r.rad, tab.klubbCol).setValue(nyVerdi);
+      r.klubb = klubb;
+      fylt.push(r.navn + ' -> ' + nyVerdi + (kilde === 'lagsiden' ? '  (fra lagsiden)' : ''));
+    } else if (r.klubb.join(', ') !== nyVerdi) {
+      avvik.push(r.navn + ': arket har ' + r.klubb.join(', ') + ', fotball.no sier ' + nyVerdi);
+    }
+  });
+
+  if (fylt.length) {
+    L.push('KLUBB-ID FYLT INN (' + fylt.length + ')');
+    fylt.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+    endret += fylt.length;
+  }
+  if (avvik.length) {
+    L.push('KLUBB-ID AVVIK (' + avvik.length + ') — ikke overskrevet.');
+    avvik.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+    endret += avvik.length;
+  }
+  if (ukjent.length) {
+    L.push('KLUBB-ID UKJENT (' + ukjent.length + ') — fyll inn for hånd om du trenger den.');
+    ukjent.forEach(function (x) { L.push('  ' + x); });
+    L.push('');
+  }
+  return { linjer: L, endret: endret };
+}
+
+/**
+ * Klubb-ID-ene lagsiden lenker til, uten duplikater. Et lag hører til én
+ * klubb, så alt annet enn ett treff betyr at siden viser noe mer enn laget
+ * selv — og da gjetter vi ikke.
+ */
+function klubbFraLagside_(teamId) {
+  const url = 'https://www.fotball.no/fotballdata/lag/hjem/?fiksId=' + teamId;
+  const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  if (res.getResponseCode() !== 200) {
+    throw new Error('fotball.no svarte ' + res.getResponseCode() + ' på lagsiden');
+  }
+  const naken = String(res.getContentText('UTF-8')).replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  const rx = /href="[^"]*klubb\/hjem\/\?fiksId=(\d+)/g;
+  const ut = [];
+  let m;
+  while ((m = rx.exec(naken)) !== null) { if (ut.indexOf(m[1]) === -1) ut.push(m[1]); }
+  return ut;
 }
 
 // ------------------------------------------------------------------ LENKER -
@@ -890,10 +1034,18 @@ function nightly() {
 
 function fetchFixtures_(settings) {
   settings = settings || loadProfiles_()[0];
-  const res = UrlFetchApp.fetch(feedUrl_(settings.clubId), { muteHttpExceptions: true, followRedirects: true });
-  if (res.getResponseCode() !== 200) throw new Error('fotball.no svarte ' + res.getResponseCode());
+  const clubIds = settings.clubIds || [settings.clubId];
 
-  const text = res.getContentText('UTF-8').replace(/\r?\n[ \t]/g, '');   // RFC 5545 line folding
+  // Én kalender per klubb, lagt etter hverandre. En kamp mellom to av
+  // klubbene står i begge, og fjernes som duplikat nedenfor.
+  const text = clubIds.map(function (id) {
+    const res = UrlFetchApp.fetch(feedUrl_(id), { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() !== 200) {
+      throw new Error('fotball.no svarte ' + res.getResponseCode() + ' på kalenderen til klubb ' + id);
+    }
+    return res.getContentText('UTF-8');
+  }).join('\n').replace(/\r?\n[ \t]/g, '');   // RFC 5545 line folding
+  const sett = {};
   const prefixes = settings.teams.map(norm_);
   const ours = function (name) {
     const n = norm_(name);
@@ -920,8 +1072,12 @@ function fetchFixtures_(settings) {
     const dayM = (parts[3] || '').match(/\b(mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\b/i);
     const roundM = (parts[0] || '').match(/\(runde\s*(\d+)\)/i);
 
+    const key = matchKey_(serie, teams.home, teams.away);
+    if (sett[key]) return;                  // samme kamp fra en annen klubbs kalender
+    sett[key] = true;
+
     out.push({
-      key: matchKey_(serie, teams.home, teams.away),
+      key: key,
       serie: serie,
       runde: roundM ? Number(roundM[1]) : null,
       homeLong: teams.home,

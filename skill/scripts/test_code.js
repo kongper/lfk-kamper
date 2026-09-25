@@ -195,6 +195,7 @@ const sandbox = {
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
   UrlFetchApp: {
     fetch: (url) => {
+      (sandbox.FETCHED = sandbox.FETCHED || []).push(url);
       if (/lag\/hjem\/\?fiksId=(\d+)$/.test(url)) {
         const id = url.match(/fiksId=(\d+)$/)[1];
         const lag = (sandbox.LAGSIDER || {})[id] || [];
@@ -203,15 +204,23 @@ const sandbox = {
         const soppel = lag.map(([n, i]) =>
           `<script>$('#x').on('error', function() {}); ` +
           `<a href="/fotballdata/lag/hjem/?fiksId=${i}">${n}</a></script>`).join('');
+        // Klubblenken på lagsiden. Også en inne i <script> som ikke skal telle.
+        const klubb = [].concat((sandbox.LAGKLUBB || {})[id] || []).map(k =>
+          `<a href="/fotballdata/klubb/hjem/?fiksId=${k}">Klubb</a>`).join('');
         return { getResponseCode: () => (sandbox.LAGSIDE_CODE || {})[id] || 200,
-                 getContentText: () => soppel + klubbHtml(lag) };
+                 getContentText: () => '<script><a href="/fotballdata/klubb/hjem/?fiksId=55555">x</a></script>' +
+                                        soppel + klubbHtml(lag) + klubb };
       }
       if (/klubb\/hjem/.test(url)) {
+        const kid = (url.match(/fiksId=(\d+)/) || [])[1];
+        const lagListe = (sandbox.KLUBB_LAG_BY_ID || {})[kid] || KLUBB_LAG;
         return { getResponseCode: () => sandbox.KLUBB_CODE || 200,
-                 getContentText: () => klubbHtml(sandbox.KLUBB_TOM ? [] : KLUBB_LAG) };
+                 getContentText: () => klubbHtml(sandbox.KLUBB_TOM ? [] : lagListe) };
       }
       if (!/DownloadTeamExcelCalendar/.test(url)) {
-        return { getResponseCode: () => 200, getContentText: () => icsOf(sandbox.FEED) };
+        const cid = (url.match(/clubId=(\d+)/) || [])[1];
+        const feed = sandbox.FEED_BY_CLUB ? (sandbox.FEED_BY_CLUB[cid] || []) : sandbox.FEED;
+        return { getResponseCode: () => 200, getContentText: () => icsOf(feed) };
       }
       const id = (String(url).match(/teamId=(\d+)/) || [])[1] || '';
       const code = (sandbox.XLSX_CODE || {})[id] || 200;
@@ -1182,5 +1191,95 @@ check('en formel i lagnavn-cellen røres ikke',
 sandbox.FORMULAS_ON = false;
 sandbox.FORMULA_COL = undefined;
 
+
+console.log('\n--- flere klubber i Klubb-ID ---');
+const profOf = (vals) => {
+  CONFIG_ROWS = [['Nøkkel', 'Kamper']].concat(vals).concat([['Lag', 'Lillehammer G15-1']]);
+  return sandbox.loadProfiles_()[0];
+};
+check('én klubb som før', Array.from(profOf([['Klubb-ID', '1683']]).clubIds), ['1683']);
+check('kommaseparert gir flere', Array.from(profOf([['Klubb-ID', '1683, 1234']]).clubIds), ['1683', '1234']);
+check('semikolon og mellomrom går også', Array.from(profOf([['Klubb-ID', '1683;1234 99']]).clubIds), ['1683', '1234', '99']);
+check('flere rader går også', Array.from(profOf([['Klubb-ID', '1683'], ['Klubb-ID', '1234']]).clubIds), ['1683', '1234']);
+check('duplikater fjernes', Array.from(profOf([['Klubb-ID', '1683, 1683']]).clubIds), ['1683']);
+check('uten Klubb-ID er standard 1683', Array.from(profOf([]).clubIds), ['1683']);
+check('clubId er første klubb', profOf([['Klubb-ID', '1234, 1683']]).clubId, '1234');
+
+// Kalenderen hentes per klubb og slås sammen. En kamp mellom to av klubbene
+// står i begge kalenderne og skal bare komme med én gang.
+const alle = sandbox.FEED;
+const felles = alle[0];
+sandbox.FEED_BY_CLUB = { '1683': alle.slice(0, 5), '1234': [felles].concat(alle.slice(5, 8)) };
+sandbox.FETCHED = [];
+const flerProf = profOf([['Klubb-ID', '1683, 1234']]);
+flerProf.teams = ['Lillehammer'];
+const flerKamper = sandbox.fetchFixtures_(flerProf);
+check('begge kalenderne hentes',
+  sandbox.FETCHED.filter(u => /GetCalendarForClub/.test(u)).map(u => u.match(/clubId=(\d+)/)[1]), ['1683', '1234']);
+const forventet = new Set(alle.slice(0, 8).map(f => sandbox.matchKey_(f.serie, f.homeLong, f.awayLong)));
+check('kampene fra begge kommer med, felleskampen én gang', flerKamper.length, forventet.size);
+check('ingen nøkkel to ganger', new Set(flerKamper.map(f => f.key)).size, flerKamper.length);
+sandbox.FEED_BY_CLUB = null;
+
+console.log('\n--- Klubb-ID i system-fanen ---');
+CONFIG_ROWS = [
+  ['Nøkkel', 'Kamper'],
+  ['Klubb-ID', '1683, 1234'],
+  ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
+  ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2'],
+  ['Varsle e-post', 'din@epost.no']
+];
+sandbox.KLUBB_LAG_BY_ID = {
+  '1683': [['Lillehammer G15-1', '136204'], ['Lillehammer G15-2', '155261'], ['Lillehammer G16-1', '139037']],
+  '1234': [['Lillehammer G16-2', '148115']]
+};
+SYSTEM_ROWS = systemOppsett().slice(0, 11).concat([
+  ['Lillehammer G15-1', ''], ['Lillehammer G15-2', ''], ['Lillehammer G16-1', ''], ['Lillehammer G16-2', ''],
+  ['Nordstrand', '208807'], ['Hasle-Løren', '112233'], ['Ukjent FK', '424242']
+]);
+sandbox.LAGSIDER = {};
+sandbox.LAGKLUBB = { '208807': '700', '112233': ['701', '702'] };
+sandbox.FETCHED = [];
+const rapK = sandbox.hentLagIder();
+const kid = navn => String((SYSTEM_ROWS.find(r => r[0] === navn) || [])[2] || '');
+check('overskriften legges til rett til høyre for Lag-ID', SYSTEM_ROWS[10][2], 'Klubb-ID');
+check('vårt lag får klubben det ble funnet under', kid('Lillehammer G15-1'), '1683');
+check('og laget fra den andre klubben får den klubben', kid('Lillehammer G16-2'), '1234');
+check('motstander får klubben fra lagsiden, ikke fra <script>', kid('Nordstrand'), '700');
+check('to klubber på lagsiden gir ingen — heller tom enn feil', kid('Hasle-Løren'), '');
+check('lagside uten klubblenke gir tom', kid('Ukjent FK'), '');
+check('rapporten sier hva som ble fylt', /KLUBB-ID FYLT INN[\s\S]*Nordstrand -> 700/.test(rapK), true);
+check('og hva som er ukjent', /KLUBB-ID UKJENT[\s\S]*Hasle-Løren/.test(rapK), true);
+check('verdilistene øverst er fortsatt urørt', [SYSTEM_ROWS[0][0], SYSTEM_ROWS[0][2]], ['Sorter etter dato', undefined]);
+
+// Andre kjøring: fylte celler står, lagsider hentes bare for de tomme.
+SYSTEM_ROWS.find(r => r[0] === 'Nordstrand')[2] = '999';
+sandbox.FETCHED = [];
+const rapK2 = sandbox.hentLagIder();
+check('en celle med verdi overskrives ikke', kid('Nordstrand'), '999');
+check('lagsiden til et lag som har Klubb-ID hentes ikke',
+  sandbox.FETCHED.some(u => /lag\/hjem\/\?fiksId=208807$/.test(u)), false);
+check('avvik mot lagoversikten rapporteres', (() => {
+  SYSTEM_ROWS.find(r => r[0] === 'Lillehammer G15-1')[2] = '1234';
+  return /KLUBB-ID AVVIK[\s\S]*Lillehammer G15-1: arket har 1234, fotball.no sier 1683/.test(sandbox.hentLagIder());
+})(), true);
+
+// Kolonnen til høyre er i bruk: ikke skriv over, si fra.
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[12][2] = 'notat';
+sandbox.KLUBB_LAG_BY_ID = null;
+const rapOpptatt = sandbox.hentLagIder();
+check('opptatt kolonne gir melding', /kolonnen til høyre for Lag-ID er i bruk/.test(rapOpptatt), true);
+check('og ingen overskrift skrives', SYSTEM_ROWS[10][2] || '', '');
+check('notatet står', SYSTEM_ROWS[12][2], 'notat');
+
+// Klubb-ID som står lenger ute i overskriftsraden finnes også.
+SYSTEM_ROWS = systemOppsett();
+SYSTEM_ROWS[10] = ['Lag', 'Lag-ID', 'Merknad', 'Klubb-ID'];
+CONFIG_ROWS[1] = ['Klubb-ID', '1683'];
+sandbox.hentLagIder();
+check('Klubb-ID etter en annen kolonne i samme tabell',
+  [SYSTEM_ROWS[11][2] || '', SYSTEM_ROWS[11][3]], ['', '1683']);
+sandbox.LAGKLUBB = {};
 console.log('\n' + (failures ? failures + ' FAILURE(S)' : 'all checks passed'));
 process.exit(failures ? 1 : 0);

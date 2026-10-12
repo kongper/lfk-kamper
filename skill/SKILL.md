@@ -205,11 +205,45 @@ is the `Lag` list in `config` having gone stale after an age-group change.
 Diagnose it before reaching for `--force`, and never use `--force` without
 saying plainly what it will insert.
 
+## Taking a team out of `config`
+
+Two different things look identical from below — both are a row with no fixture
+in the feed — and the sync tells them apart by whether the row's teams still
+match the `Lag` list.
+
+| Situation | Where it lands | What happens |
+|---|---|---|
+| Team still followed, fixture gone | `missingFromFeed` → `IKKE I KALENDEREN` | Reported if the date is still ahead. Played matches age out of the feed constantly, so past ones stay silent. |
+| Team no longer in `Lag` | `foreignRows` → `ANDRE LAG ENN DE DU FØLGER` | Listed in full. Deleted only if `Fjern rader for andre lag` is `ja`. |
+
+`Fjern rader for andre lag` defaults to `nei`, and that default is deliberate:
+deletion is the one thing the sync cannot take back, and the nightly trigger
+runs with nobody watching. On `nei` the rows are listed with a line telling the
+user which setting turns deletion on — so the answer to "why didn't those rows
+disappear" is in the report itself.
+
+Two safeguards sit behind the setting. Rows for teams no longer followed are
+left out of the mass-insert guard's match-rate numbers, so dropping a team never
+makes the sync look like it has lost track of the sheet. And if *every* row in
+the sheet comes out foreign, nothing is deleted at all and a warning says why —
+that is the signature of a mistyped `Lag` entry, not of a sheet that should be
+emptied.
+
+Matching here is the same prefix test the feed is filtered through, applied to
+the names as written in the sheet. For a row a user typed by hand in short form
+(`Lillehammer 2` rather than `Lillehammer G15-2`) the prefix test cannot work,
+so the sync falls back to the same normalisation it matches rows with. That
+fallback cannot tell G15-2 from G16-2, which is the safe direction: such a row
+is kept, not deleted. A foreign row is also skipped by the result lookup — a
+date-only hit would otherwise write someone else's score into it.
+
 ## Things that will bite
 
-**Rows are never deleted.** A fixture that vanishes from the feed shows up in
-`missingFromFeed`, not in a deletion. It usually means the match was played and
-aged out, but for a future date it can mean a cancellation — surface those.
+**The sync deletes nothing unless `config` says so.** A fixture that vanishes
+from the feed shows up in `missingFromFeed`, never in a deletion — it usually
+means the match was played and aged out, but for a future date it can mean a
+cancellation, so surface those. The single exception is rows for teams taken out
+of `Lag`, and only with `Fjern rader for andre lag` set to `ja`; see above.
 
 **The nightly run emails the user only when something changed.** If they say
 "I got a mail from the sheet", that is this. `preview` will usually be empty

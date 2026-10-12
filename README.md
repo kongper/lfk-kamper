@@ -60,6 +60,29 @@ pick up colours.
 There is no separate preview item in the menu: *Kjør synk* shows the full report
 and asks before writing, so answering No is the preview.
 
+## Taking a team out of `Lag`
+
+A row with no fixture in the feed can mean two unrelated things, and the sync
+separates them by asking whether the row's teams are still in `Lag`:
+
+| | Reported as | Deleted? |
+|---|---|---|
+| Team still followed | `IKKE I KALENDEREN` — only if the date is ahead | never |
+| Team no longer in `Lag` | `ANDRE LAG ENN DE DU FØLGER` — all of them | only on `Fjern rader for andre lag` = `ja` |
+
+Played matches drop out of the feed continually, which is why a missing fixture
+is reported rather than acted on. Removing a team from `Lag`, on the other hand,
+is something you did on purpose, so those rows can be cleaned up — but only if
+you ask for it. `Fjern rader for andre lag` defaults to `nei`, and the report
+tells you which setting turns it on, so nothing disappears from a nightly run
+you weren't watching.
+
+Two things guard the deletion. Rows for teams you no longer follow are kept out
+of the mass-insert guard's arithmetic, so dropping a team never looks like
+broken matching. And if *every* row in the sheet comes out as another team's,
+nothing is deleted and the run says why — that is what a typo in `Lag` looks
+like, not a sheet that wants emptying.
+
 ## Three things that were not obvious
 
 **fotball.no regenerates the iCal UIDs.** The feed gives every fixture a `UID`,
@@ -93,7 +116,7 @@ skill/
   SKILL.md           agent instructions
   references/        setup guide
   scripts/lfk.py         HTTP client for the web app
-  scripts/test_code.js   regression suite (41 checks, plain node)
+  scripts/test_code.js   regression suite (232 checks, plain node)
 tools/
   package-skill.sh   builds dist/lfk-kamper.skill
 ```
@@ -141,6 +164,7 @@ spreadsheet can track several squads independently.
 | Varsle e-post | din@epost.no | annen@epost.no |
 | Sorter etter dato | ja | ja |
 | Formater rader | alle | nei |
+| Fjern rader for andre lag | nei | ja |
 
 A key may repeat down the rows — that is how `Lag` becomes a list — and blank
 cells simply mean that column does not use that row. Each column gets its own

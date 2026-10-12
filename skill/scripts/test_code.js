@@ -184,6 +184,7 @@ const xlRow = (dato, hjemme, res, borte, tur, knr) =>
 // ---- Apps Script stubs -----------------------------------------------------
 const written = [];
 let appended = [];
+let DELETED = [];
 const props = {};
 const sandbox = {
   console, FORMULAS_ON: false,
@@ -308,6 +309,7 @@ const MAIN = {
         }),
         getLastColumn: () => HEADER.length + (sandbox.EXTRA_COLS || 0),
         getLastRow: () => sheetValues.length,
+        deleteRow: r => { DELETED.push(r); },
         getRange: (r, c, nr, nc) => ({
           setValue: v => written.push([r, c, v]),
           setValues: vs => { appended = appended.concat(vs); },
@@ -590,6 +592,77 @@ CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat([
   ['Lag', 'Lillehammer G15-1'], ['Lag', 'Lillehammer G15-2'],
   ['Lag', 'Lillehammer G16-1'], ['Lag', 'Lillehammer G16-2']]);
 sandbox.FEED = makeFeed();
+
+console.log('\n--- taking a team out of config ---');
+// A synced sheet carries fotball.no's spelling, so put the harness in that
+// state before dropping a team: that is the situation the setting is about.
+const SHORT_BEFORE_DROP = sheetValues.slice(1).map(r => r.slice());
+sheetValues.slice(1).forEach(r => {
+  const serie = r[C['Turnering']];
+  if (!serie) return;
+  r[C['Hjemmelag']] = longOf(r[C['Hjemmelag']], serie);
+  r[C['Bortelag']] = longOf(r[C['Bortelag']], serie);
+});
+const TEAMS_BEFORE_DROP = CONFIG_ROWS.filter(r => r[0] === 'Lag').map(r => r.slice());
+const setTeams = names => {
+  CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat(names.map(n => ['Lag', n]));
+};
+const setRemoveForeign = v => {
+  CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Fjern rader for andre lag');
+  if (v) CONFIG_ROWS.push(['Fjern rader for andre lag', v]);
+};
+
+setTeams(['Lillehammer G15-1', 'Lillehammer G15-2', 'Lillehammer G16-1']);   // G16-2 dropped
+const planDrop = sandbox.buildPlans_('Kamper')[0];
+const g16_2 = sheetValues.slice(1)
+  .map((r, i) => (r[C['Hjemmelag']] === 'Lillehammer G16-2' || r[C['Bortelag']] === 'Lillehammer G16-2') ? i + 2 : null)
+  .filter(Boolean);
+check('its rows are listed as belonging to another team',
+  planDrop.foreignRows.map(f => f.row), g16_2);
+check('  ... and not as missing from the calendar', planDrop.missingFromFeed.length, 0);
+check('  ... and they do not count against the duplication guard', planDrop.suspect, false);
+check('  ... and are left out of the match-rate numbers',
+  planDrop.existingRows, sheetValues.length - 1 - g16_2.length);
+check('the report explains how to get rid of them',
+  /ANDRE LAG ENN DE DU FØLGER \(\d+\) — sett "Fjern rader for andre lag"/
+    .test(sandbox.renderPlan_(planDrop)), true);
+
+DELETED = [];
+check('nothing is deleted while the setting is off', sandbox.applyPlan_(planDrop).rowsRemoved, 0);
+check('  ... and deleteRow was never called', DELETED.length, 0);
+
+setRemoveForeign('ja');
+const planDrop2 = sandbox.buildPlans_('Kamper')[0];
+check('the plan now carries the go-ahead', planDrop2.removeForeign, true);
+check('the report says they will go', /— SLETTES/.test(sandbox.renderPlan_(planDrop2)), true);
+DELETED = [];
+const resDrop = sandbox.applyPlan_(planDrop2);
+check('exactly the listed rows are deleted', resDrop.rowsRemoved, g16_2.length);
+check('  ... and they are those rows', DELETED.slice().sort((a, b) => a - b), g16_2);
+check('  ... bottom-up, so the row numbers stay valid as the sheet shifts',
+  DELETED.every((r, i) => i === 0 || DELETED[i - 1] > r), true);
+
+// Deleting is the only thing the sync cannot undo, so a config that matches
+// nothing at all must not be read as "empty the sheet".
+setTeams(['Lillehammer J13-9']);
+const planNone = sandbox.buildPlans_('Kamper')[0];
+check('a filter that matches nothing makes every row foreign',
+  [planNone.foreignRows.length, planNone.existingRows], [sheetValues.length - 1, 0]);
+DELETED = [];
+const resNone = sandbox.applyPlan_(planNone);
+check('  ... and then nothing is deleted at all', [resNone.rowsRemoved, DELETED.length], [0, 0]);
+check('  ... but it says why',
+  new RegExp('Slettet ingen av de ' + (sheetValues.length - 1) + ' radene').test(resNone.warnings.join(' ')), true);
+
+check('a sync with only deletions pending still counts as work',
+  sandbox.planHasWork_({ updates: [], additions: [], removeForeign: true, foreignRows: [{ row: 5 }] }) > 0, true);
+check('  ... and does not while the setting is off',
+  sandbox.planHasWork_({ updates: [], additions: [], removeForeign: false, foreignRows: [{ row: 5 }] }), 0);
+
+setRemoveForeign(null);
+CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat(TEAMS_BEFORE_DROP);
+sheetValues.splice(1, sheetValues.length - 1, ...SHORT_BEFORE_DROP);
+DELETED = [];
 
 console.log('\n--- one config column per fixture sheet ---');
 // A second column, headed with a sheet name, is a second terminliste.

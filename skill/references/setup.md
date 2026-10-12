@@ -104,3 +104,9 @@ mass-insert guard will catch that one and refuse to write.
 
 Keep the names as specific as the teams you actually want. `Lillehammer G16`
 matches `Lillehammer G16-3` too, which plays a series this sheet does not track.
+
+Taking a team **out** of `Lag` does not remove its rows on its own. They are
+listed under `ANDRE LAG ENN DE DU FØLGER` in the report, and are deleted only
+if `Fjern rader for andre lag` is set to `ja` for that column. Turn it on when
+the old rows are genuinely unwanted; leave it off when the tab is meant to keep
+last season's history.

@@ -36,8 +36,19 @@
  * nøkkel. Det er derfor synken kjenner igjen radene sine selv om skrivemåten
  * i arket endrer seg.
  *
- * Rader slettes aldri. Kamper som forsvinner fra strømmen blir rapportert —
- * strømmen er framoverskuende og mister ferdigspilte kamper.
+ * NÅR EN RAD IKKE FINNES I STRØMMEN
+ *
+ * To helt forskjellige ting ser like ut nedenfra: begge er en rad uten kamp.
+ * Synken skiller dem på om radens lag fortsatt står i "Lag" i config.
+ *
+ *   Laget følges       kampen er spilt, utsatt eller strøket. Strømmen er
+ *                      framoverskuende og mister ferdigspilte kamper, så dette
+ *                      blir rapportert og ellers latt i fred.
+ *   Laget følges ikke  du har tatt laget ut av config. Raden hører ikke hjemme
+ *                      i arket lenger, og kan slettes — men bare hvis
+ *                      "Fjern rader for andre lag" står på "ja". Standard er
+ *                      "nei", for sletting er det eneste synken gjør som ikke
+ *                      lar seg angre fra en nattlig kjøring.
  *
  * Førstegangsoppsett: kjør setup() én gang fra editoren.
  */
@@ -63,7 +74,8 @@ const CONFIG = {
     ],
     'Varsle e-post': ['din@epost.no'],
     'Sorter etter dato': ['ja'],
-    'Formater rader': ['alle']
+    'Formater rader': ['alle'],
+    'Fjern rader for andre lag': ['nei']
   }
 };
 
@@ -108,6 +120,8 @@ const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag'
  *   Lag                 Lillehammer G16-2
  *   Varsle e-post       din@epost.no         annen@epost.no
  *   Sorter etter dato   ja                   ja
+ *   Fjern rader for
+ *     andre lag         nei                  ja
  *
  * En nøkkel kan stå på flere rader — det er slik "Lag" blir en liste. Tomme
  * celler betyr bare at den kolonnen ikke bruker den raden, så kolonnene
@@ -126,6 +140,10 @@ const DAY_NAMES = ['søndag', 'mandag', 'tirsdag', 'onsdag', 'torsdag', 'fredag'
  * Poenget med å styre på lag i stedet for på serienavn: et lag beholder navnet
  * gjennom sesongen, mens serienavnene bytter hver gang laget rykker opp et
  * årstrinn. Nye serier og cupkamper for de samme lagene kommer med av seg selv.
+ *
+ * "Fjern rader for andre lag" avgjør hva som skjer når du tar et lag UT av
+ * lista. På "nei" blir radene stående og bare rapportert; på "ja" sletter
+ * synken dem. Se rad-bolken øverst i fila.
  *
  * Den gamle enkolonne-varianten med overskriften "Verdi" leses fortsatt. Da
  * finnes fanen via nøkkelen "Ark", eller på innhold hvis den står tom.
@@ -190,7 +208,8 @@ function buildProfile_(sheetName, raw) {
     teamIds: teamIdsFor_(teams),
     notifyEmail: (pick('Varsle e-post') || [''])[0],
     sortAfterSync: /^(ja|yes|true|1)$/i.test((pick('Sorter etter dato') || ['ja'])[0]),
-    formatMode: norm_((pick('Formater rader') || ['alle'])[0])
+    formatMode: norm_((pick('Formater rader') || ['alle'])[0]),
+    removeForeign: /^(ja|yes|true|1)$/i.test((pick('Fjern rader for andre lag') || ['nei'])[0])
   };
 }
 
@@ -884,9 +903,15 @@ function onOpen() {
     .addToUi();
 }
 
+/** Har planen noe å skrive? Sletting teller bare når config har bedt om den. */
+function planHasWork_(plan) {
+  return plan.updates.length + plan.additions.length +
+         (plan.removeForeign ? (plan.foreignRows || []).length : 0);
+}
+
 function menuApply() {
   const plans = buildPlans_();
-  const pending = plans.filter(function (p) { return p.updates.length + p.additions.length; });
+  const pending = plans.filter(planHasWork_);
   const body = plans.map(renderPlan_).join('\n\n' + '='.repeat(60) + '\n\n');
 
   // Ingen kampendringer: vis rapporten og oppdater formateringen likevel, for
@@ -906,7 +931,8 @@ function menuApply() {
   const lines = pending.map(function (plan) {
     const res = applyPlan_(plan);
     return [plan.sheetName + ':',
-            '  Rader oppdatert: ' + res.rowsUpdated + ', lagt til: ' + res.rowsAdded,
+            '  Rader oppdatert: ' + res.rowsUpdated + ', lagt til: ' + res.rowsAdded +
+              (res.rowsRemoved ? ', slettet: ' + res.rowsRemoved : ''),
             res.sort && res.sort.sorted ? '  Sortert på Dato (' + res.sort.how + ')' : '',
             res.format && res.format.formatted ? '  Formatert: ' + res.format.formatted + ' rader' : '',
             res.additionsHeld ? '  NYE RADER HOLDT TILBAKE — se advarselen i forhåndsvisningen.' : '',
@@ -1009,7 +1035,8 @@ function json_(obj) {
 
 function nightly() {
   buildPlans_().forEach(function (plan) {
-    const notable = plan.updates.length + plan.additions.length + plan.missingFromFeed.length;
+    const notable = plan.updates.length + plan.additions.length +
+                    plan.missingFromFeed.length + (plan.foreignRows || []).length;
     if (notable === 0) {
       // Rolig natt for kampene, men config kan ha fått en ny farge.
       const prof = loadProfiles_().filter(function (p) { return norm_(p.sheetName) === norm_(plan.sheetName); })[0];
@@ -1019,7 +1046,8 @@ function nightly() {
 
     const res = applyPlan_(plan);
     const body = renderPlan_(plan) +
-      '\n\n---\nSkrevet: ' + res.rowsUpdated + ' rad(er) oppdatert, ' + res.rowsAdded + ' lagt til.' +
+      '\n\n---\nSkrevet: ' + res.rowsUpdated + ' rad(er) oppdatert, ' + res.rowsAdded + ' lagt til' +
+      (res.rowsRemoved ? ', ' + res.rowsRemoved + ' slettet.' : '.') +
       (res.additionsHeld ? '\nNye rader ble holdt tilbake — se advarselen over.' : '') +
       (res.warnings.length ? '\n\nAdvarsler:\n- ' + res.warnings.join('\n- ') : '');
 
@@ -1046,11 +1074,7 @@ function fetchFixtures_(settings) {
     return res.getContentText('UTF-8');
   }).join('\n').replace(/\r?\n[ \t]/g, '');   // RFC 5545 line folding
   const sett = {};
-  const prefixes = settings.teams.map(norm_);
-  const ours = function (name) {
-    const n = norm_(name);
-    return prefixes.some(function (p) { return n.indexOf(p) === 0; });
-  };
+  const ours = teamMatcher_(settings.teams);
 
   const out = [];
   text.split('BEGIN:VEVENT').slice(1).forEach(function (block) {
@@ -1092,6 +1116,46 @@ function fetchFixtures_(settings) {
 
   out.sort(function (a, b) { return a.iso < b.iso ? -1 : a.iso > b.iso ? 1 : 0; });
   return out;
+}
+
+/**
+ * Prøven på om et lagnavn er et av dem arket følger: "Lag" er et prefiks, så
+ * "Lillehammer G16" treffer "Lillehammer G16-1". Dette er silen kalenderen
+ * kjøres gjennom, og navnene derfra er alltid fotball.no sin egen skrivemåte.
+ */
+function teamMatcher_(teams) {
+  const prefixes = (teams || []).map(norm_);
+  return function (name) {
+    const n = norm_(name);
+    return prefixes.some(function (p) { return p && n.indexOf(p) === 0; });
+  };
+}
+
+// Et lagnavn slik fotball.no skriver det ender på lagregistreringen: G15-2,
+// J13-1. Mangler den, er navnet skrevet inn for hånd og forkortet.
+const QUALIFIED_NAME = /\s[GJ]\d+-\d+\s*$/i;
+
+/**
+ * Samme prøve, men for navn som står i ARKET — og der er ikke alle skrevet av
+ * synken. En rad noen har ført inn selv kan stå som "Lillehammer 2" der
+ * fotball.no skriver "Lillehammer G15-2", og en ren prefikstest ville dømt den
+ * som et lag arket ikke følger.
+ *
+ * Derfor: bærer navnet lagregistreringen, er prefikstesten fasit — da er navnet
+ * fotball.no sitt, og treffer det ikke, hører laget virkelig ikke hjemme her.
+ * Mangler registreringen, faller vi tilbake på den samme forkortingen som
+ * brukes til å kjenne igjen rader. Den skiller ikke G15-2 fra G16-2, så den er
+ * for mild — men den feiler i riktig retning: en rad blir stående, ikke slettet.
+ */
+function rowTeamMatcher_(teams) {
+  const strict = teamMatcher_(teams);
+  const canon = (teams || []).map(canonKey_);
+  return function (name) {
+    if (strict(name)) return true;
+    if (QUALIFIED_NAME.test(String(name))) return false;
+    const c = canonKey_(name);
+    return !!c && canon.indexOf(c) !== -1;
+  };
 }
 
 /**
@@ -1604,7 +1668,8 @@ function buildPlan_(profile) {
   const teamsResolved = Object.keys(resolved).sort();
   const teamsWithoutMatch = settings.teams.filter(function (pfx) { return !hitPrefix[pfx]; });
 
-  const updates = [], additions = [], missingFromFeed = [], nameChanges = [];
+  const updates = [], additions = [], missingFromFeed = [], foreignRows = [], nameChanges = [];
+  const ours = rowTeamMatcher_(settings.teams);
   const taken = {};
   const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
 
@@ -1667,6 +1732,13 @@ function buildPlan_(profile) {
         const cur = fmtCell_(row.cells[t.col[name]], name);
         if (norm_(cur) !== norm_(nxt)) changes.push({ column: name, from: cur, to: nxt });
       });
+    } else if (!ours(row.home) && !ours(row.away)) {
+      // Hører raden til et lag arket følger? Står laget ikke i "Lag" lenger, er
+      // ikke kampen borte — det er du som har sluttet å følge laget, og da er
+      // raden fremmed i stedet for savnet. Spilte kamper faller ut av strømmen
+      // hele tiden, så de to må holdes fra hverandre.
+      row.foreign = true;
+      foreignRows.push({ row: row.rowNum, label: row.label });
     } else if (isoOf_(row.dato) >= today) {
       // Kamper som ligger fram i tid og ikke finnes i kalenderen er verdt et
       // varsel. Spilte kamper er det ikke — de faller ut av strømmen av seg
@@ -1676,7 +1748,10 @@ function buildPlan_(profile) {
 
     // Resultatet står på egne bein: en spilt kamp er borte fra kalenderen, så
     // denne raden har ingen fixture å henge på. Derfor utenfor if (f).
-    if (wantResults && !laast('Resultat')) {
+    // Fremmede rader står utenfor: resultatene er hentet for lagene arket
+    // følger, og et treff på dato alene ville vært et tilfeldig resultat skrevet
+    // inn i en rad som uansett ikke hører hjemme her.
+    if (wantResults && !row.foreign && !laast('Resultat')) {
       let res = results.byKey[row.key];
       if (!res) {
         res = resultatPaaDato_(results, row, brukteResultater);
@@ -1711,9 +1786,13 @@ function buildPlan_(profile) {
   // ikke ble kjent igjen, for da legges de inn på nytt ved siden av seg selv.
   //
   // Derfor ser vi på hvor stor andel av de eksisterende radene som fant kampen
-  // sin. Et tomt ark har ingen rader å miste og utløser aldri sperren.
-  const existingRows = pending.length;
-  const matchedRows = pending.filter(function (p) { return p.fixture; }).length;
+  // sin. Et tomt ark har ingen rader å miste og utløser aldri sperren. Rader
+  // for lag arket ikke følger holdes utenfor regnestykket — de har en kjent
+  // grunn til å ikke matche, og ville ellers fått sperren til å slå ut hver
+  // gang et lag ble tatt ut av config.
+  const countable = pending.filter(function (p) { return !p.foreign; });
+  const existingRows = countable.length;
+  const matchedRows = countable.filter(function (p) { return p.fixture; }).length;
   const ceiling = Math.max(3, Math.round(0.25 * fixtures.length));
   const suspect = additions.length > ceiling && existingRows > 0 && matchedRows * 2 < existingRows;
 
@@ -1726,10 +1805,12 @@ function buildPlan_(profile) {
     teamFilter: settings.teams,
     teamsWithoutMatch: teamsWithoutMatch,
     sortAfterSync: settings.sortAfterSync,
+    removeForeign: !!settings.removeForeign,
     updates: updates,
     additions: additions,
     nameChanges: nameChanges,
     missingFromFeed: missingFromFeed,
+    foreignRows: foreignRows,
     resultsWritten: resultsWritten,
     resultsOnDate: resultsOnDate,
     resultsAvailable: results.resultCount || 0,
@@ -1800,9 +1881,31 @@ function applyPlan_(plan) {
     rowsAdded = newRows.length;
   }
 
+  // Rader for lag arket ikke følger lenger. Dette er det eneste stedet synken
+  // fjerner noe, så den gjør det bare når config ber om det.
+  //
+  // Nederst først: sletting flytter alt under seg oppover, så radnumrene over
+  // blir ugyldige med en gang. Nye rader er allerede lagt til under de gamle,
+  // og de flytter seg bare oppover — innholdet er skrevet ferdig.
+  //
+  // Sperren: er HVER ENESTE rad i arket fremmed, er det nesten aldri fordi hele
+  // terminlisten er utdatert. Da er det "Lag" som er skrevet feil, og å slette
+  // alt ville vært å gjøre en skrivefeil om til tapte data.
+  let rowsRemoved = 0;
+  const foreign = plan.removeForeign ? (plan.foreignRows || []) : [];
+  if (foreign.length && plan.existingRows === 0) {
+    warnings.push('Ingen av radene i arket hører til lagene i "' + CONFIG.CONFIG_SHEET +
+                  '". Slettet ingen av de ' + foreign.length + ' radene — sjekk "Lag" først. ' +
+                  'Skal hele arket tømmes, gjør det for hånd.');
+  } else if (foreign.length) {
+    foreign.map(function (f) { return f.row; })
+      .sort(function (a, b) { return b - a; })
+      .forEach(function (rowNum) { t.sheet.deleteRow(rowNum); rowsRemoved++; });
+  }
+
   // Sortering har bare noe å gjøre når noe er skrevet.
   let sort = { sorted: false, reason: 'ingenting skrevet' };
-  if ((cellsWritten || rowsAdded) && plan.sortAfterSync) {
+  if ((cellsWritten || rowsAdded || rowsRemoved) && plan.sortAfterSync) {
     // Ny tabellstruktur etter innsetting, så les den om igjen før sortering.
     sort = sortByDato_(locateTable_({ sheetName: plan.sheetName }));
     if (!sort.sorted && sort.reason) warnings.push('Sorterte ikke: ' + sort.reason);
@@ -1825,6 +1928,7 @@ function applyPlan_(plan) {
     links: links,
     rowsUpdated: plan.updates.length,
     rowsAdded: rowsAdded,
+    rowsRemoved: rowsRemoved,
     additionsHeld: additionsHeld,
     missingFromFeed: plan.missingFromFeed,
     sort: sort,
@@ -1931,6 +2035,15 @@ function renderPlan_(plan) {
     L.push('');
   }
 
+  const foreign = plan.foreignRows || [];
+  if (foreign.length) {
+    L.push('ANDRE LAG ENN DE DU FØLGER (' + foreign.length + ')' + (plan.removeForeign
+      ? ' — SLETTES'
+      : ' — sett "Fjern rader for andre lag" til "ja" i config for å slette dem'));
+    foreign.forEach(function (m) { L.push('rad ' + m.row + ' ' + m.label); });
+    L.push('');
+  }
+
   if (plan.missingFromFeed.length) {
     L.push('IKKE I KALENDEREN (' + plan.missingFromFeed.length + ') — sjekk de som ligger fram i tid');
     plan.missingFromFeed.forEach(function (m) { L.push('rad ' + m.row + ' ' + m.label); });
@@ -1944,7 +2057,8 @@ function renderPlan_(plan) {
     L.push('');
   }
 
-  if (!plan.updates.length && !plan.additions.length && !plan.missingFromFeed.length && !plan.suspect) {
+  if (!plan.updates.length && !plan.additions.length && !plan.missingFromFeed.length &&
+      !foreign.length && !plan.suspect) {
     L.push('Ingen endringer. I takt med fotball.no (' + plan.feedCount + ' kamper).');
   }
   return L.join('\n').replace(/\n+$/, '');

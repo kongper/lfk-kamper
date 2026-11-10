@@ -1790,7 +1790,16 @@ function buildPlan_(profile) {
   // for lag arket ikke følger holdes utenfor regnestykket — de har en kjent
   // grunn til å ikke matche, og ville ellers fått sperren til å slå ut hver
   // gang et lag ble tatt ut av config.
-  const countable = pending.filter(function (p) { return !p.foreign; });
+  //
+  // Det samme gjelder spilte kamper. Strømmen viser bare kamper fram i tid, så
+  // en rad med passert dato og uten treff er ikke en svikt i gjenkjenningen —
+  // den er bare falt ut. Uten dette slo sperren ut ved hvert sesongskifte: en
+  // ferdigspilt utesesong (0 treff) pluss en ny futsalserie (alle nye) så ut
+  // som om hele arket var blitt ugjenkjennelig. Holdt tilbake 10.11.2026.
+  // En spilt rad som likevel fant kampen sin teller fortsatt med.
+  const countable = pending.filter(function (p) {
+    return !p.foreign && (p.fixture || isoOf_(p.dato) >= today);
+  });
   const existingRows = countable.length;
   const matchedRows = countable.filter(function (p) { return p.fixture; }).length;
   const ceiling = Math.max(3, Math.round(0.25 * fixtures.length));

@@ -205,6 +205,15 @@ is the `Lag` list in `config` having gone stale after an age-group change.
 Diagnose it before reaching for `--force`, and never use `--force` without
 saying plainly what it will insert.
 
+Only rows that *could* be in the feed count towards `existingRows`: rows that
+matched, plus unmatched rows dated today or later. The feed is forward-looking,
+so a played row with no match has simply aged out and says nothing about
+whether matching works. Before this was fixed, every season change tripped the
+guard — a finished outdoor season (zero matches) plus a new futsal series (all
+new) looked exactly like total recognition failure, and the futsal fixtures
+were held back (November 2026). If the guard fires now, unmatched rows *ahead*
+of today are what it is complaining about; look at those.
+
 ## Taking a team out of `config`
 
 Two different things look identical from below — both are a row with no fixture

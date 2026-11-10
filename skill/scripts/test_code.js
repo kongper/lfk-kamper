@@ -300,6 +300,19 @@ const sandbox = {
   }
 };
 
+// The sync decides what counts as "played" by comparing against today, so the
+// harness pins the clock. Default: the day after the two oldest rows were
+// played — they are the ones makeFeed() drops from the feed — so every other
+// row is still ahead. Tests that need another day set sandbox.TODAY and put it
+// back afterwards.
+const DEFAULT_TODAY = '2026-08-16T12:00:00';
+sandbox.TODAY = DEFAULT_TODAY;
+const RealDate = Date;
+sandbox.Date = class extends RealDate {
+  constructor(...a) { if (a.length) super(...a); else super(sandbox.TODAY); }
+  static now() { return new RealDate(sandbox.TODAY).getTime(); }
+};
+
 const MAIN = {
         getName: () => 'Kamper',
         getDataRange: () => ({
@@ -547,8 +560,10 @@ console.log('\n--- safety rail against mass duplication ---');
 sandbox.FEED = makeFeed().map(f => ({ ...f, serie: f.serie + ' 2027', homeLong: 'Zzz ' + f.homeLong }));
 const planBad = sandbox.buildPlans_()[0];
 check('a whole-feed mismatch is flagged as suspect', planBad.suspect, true);
+// 41 rows in the sheet; the two played ones are out of the feed for a known
+// reason and are not counted, so 39 future rows failed to match.
 check('  ... and the reason counts unrecognised rows, not new ones',
-  [planBad.matchedRows, planBad.existingRows], [0, 41]);
+  [planBad.matchedRows, planBad.existingRows], [0, 39]);
 appended = [];
 const resBad = sandbox.applyPlan_(planBad);
 check('  ... and no rows are appended', [resBad.rowsAdded, appended.length], [0, 0]);
@@ -558,6 +573,54 @@ check('  ... but it can be overridden deliberately', (() => {
   return sandbox.applyPlan_(planBad).rowsAdded > 0;
 })(), true);
 sandbox.FEED = makeFeed();
+
+console.log('\n--- season change: a played season plus a new series is not a mismatch ---');
+// What actually happened 10.11.2026: the outdoor season was over, so every row
+// in the sheet had aged out of the feed, and the feed held only a new futsal
+// series. Zero matches plus all-new fixtures used to trip the guard, and the
+// futsal fixtures were held back.
+sandbox.TODAY = '2026-11-10T12:00:00';
+const FUTSAL = [
+  ['14.11.2026', '09:00', 'Lillehammer G15-2', 'Follebu Gausdal G15-1', 'Futsal - G15-1- avd-.01'],
+  ['14.11.2026', '09:30', 'Lillehammer G15-1', 'Ottestad G15-1',        'Futsal - G15-1- avd-.01'],
+  ['14.11.2026', '10:30', 'Ottestad G15-1',    'Lillehammer G15-2',     'Futsal - G15-1- avd-.01'],
+  ['14.11.2026', '11:30', 'Lillehammer G15-1', 'Roterud G15-1',         'Futsal - G15-1- avd-.01'],
+  ['28.11.2026', '09:00', 'Roterud G15-1',     'Lillehammer G15-1',     'Futsal - G15-2- avd-.04'],
+  ['28.11.2026', '10:00', 'Lillehammer G15-1', 'Stange G15-2',          'Futsal - G15-2- avd-.04'],
+  ['29.11.2026', '09:00', 'Follebu Gausdal G16-1', 'Lillehammer G16-1', 'Futsal - G16-2- avd-.03'],
+  ['29.11.2026', '09:30', 'Lillehammer G16-2', 'Ringebu-Fåvang G16-1',  'Futsal - G16-2- avd-.02']
+].map(([dato, tid, h, a, serie]) => ({
+  serie, homeLong: h, awayLong: a, bane: 'Kristins hall', dato, tid, dag: 'lørdag'
+}));
+sandbox.FEED = FUTSAL;
+const planSeason = sandbox.buildPlans_('Kamper')[0];
+check('every futsal fixture is queued', planSeason.additions.length, FUTSAL.length);
+check('  ... and the guard does NOT fire', planSeason.suspect, false);
+check('  ... because no played row counts as unrecognised',
+  [planSeason.matchedRows, planSeason.existingRows], [0, 0]);
+check('  ... and the played rows are not nagged about either', planSeason.missingFromFeed.length, 0);
+appended = [];
+check('  ... so the rows actually get written', sandbox.applyPlan_(planSeason).rowsAdded, FUTSAL.length);
+
+// The guard still has teeth late in the season: a row dated ahead of today
+// that fails to match is still a recognition failure.
+const futureRows = FUTSAL.map(f => {
+  const r = new Array(HEADER.length).fill('');
+  r[C['Dato']] = f.dato; r[C['Tid']] = f.tid; r[C['Bane']] = f.bane;
+  r[C['Hjemmelag']] = f.homeLong; r[C['Bortelag']] = f.awayLong; r[C['Turnering']] = f.serie;
+  return r;
+});
+sheetValues.push(...futureRows);
+// Only the series drifts: both the name key and the series+date fallback miss,
+// while the fixtures still pass the team filter and all reach the plan.
+sandbox.FEED = FUTSAL.map(f => ({ ...f, serie: f.serie + ' X' }));
+const planLate = sandbox.buildPlans_('Kamper')[0];
+check('future rows that stop matching still trip the guard', planLate.suspect, true);
+check('  ... counted against the future rows only',
+  [planLate.matchedRows, planLate.existingRows], [0, FUTSAL.length]);
+sheetValues.splice(sheetValues.length - futureRows.length, futureRows.length);
+sandbox.FEED = makeFeed();
+sandbox.TODAY = DEFAULT_TODAY;
 
 console.log('\n--- the header names the teams that were actually matched ---');
 CONFIG_ROWS = CONFIG_ROWS.filter(r => r[0] !== 'Lag').concat([
@@ -621,8 +684,9 @@ check('its rows are listed as belonging to another team',
   planDrop.foreignRows.map(f => f.row), g16_2);
 check('  ... and not as missing from the calendar', planDrop.missingFromFeed.length, 0);
 check('  ... and they do not count against the duplication guard', planDrop.suspect, false);
+// The two played rows (G16-1, still followed) drop out of the count as well.
 check('  ... and are left out of the match-rate numbers',
-  planDrop.existingRows, sheetValues.length - 1 - g16_2.length);
+  planDrop.existingRows, sheetValues.length - 1 - g16_2.length - 2);
 check('the report explains how to get rid of them',
   /ANDRE LAG ENN DE DU FØLGER \(\d+\) — sett "Fjern rader for andre lag"/
     .test(sandbox.renderPlan_(planDrop)), true);
